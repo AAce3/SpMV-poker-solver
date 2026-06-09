@@ -5,55 +5,65 @@
 
 namespace spmv_poker {
 
-void DecisionNode::update_strategy() {
-  for (size_t hand = 0; hand < hand_count; ++hand) {
-    size_t begin = index(hand, 0);
+void SolverState::update_strategy(const DecisionNode &node) {
+  std::span<float> node_regrets = regret_span(node);
+  std::span<float> node_strategy = strategy_span(node);
+  for (size_t hand = 0; hand < node.hand_count; ++hand) {
+    std::span<float> hand_regrets =
+        node_regrets.subspan(hand * node.action_count, node.action_count);
+    std::span<float> hand_strategy =
+        node_strategy.subspan(hand * node.action_count, node.action_count);
     float positive_regret_sum = 0.0F;
-    for (size_t action = 0; action < action_count; ++action) {
-      positive_regret_sum += std::max(0.0F, regrets[begin + action]);
+    for (float regret : hand_regrets) {
+      positive_regret_sum += std::max(0.0F, regret);
     }
 
     if (positive_regret_sum > 0.0F) {
-      for (size_t action = 0; action < action_count; ++action) {
-        strategy[begin + action] =
-            std::max(0.0F, regrets[begin + action]) / positive_regret_sum;
+      for (size_t action = 0; action < node.action_count; ++action) {
+        hand_strategy[action] =
+            std::max(0.0F, hand_regrets[action]) / positive_regret_sum;
       }
     } else {
-      std::fill_n(strategy.begin() + begin, action_count,
-                  1.0F / static_cast<float>(action_count));
+      std::fill(hand_strategy.begin(), hand_strategy.end(),
+                1.0F / static_cast<float>(node.action_count));
     }
   }
 }
 
-void DecisionNode::accumulate_strategy(const std::vector<float> &reach_weights,
-                                       float iteration_weight) {
-  assert(reach_weights.size() == hand_count);
+void SolverState::accumulate_strategy(const DecisionNode &node,
+                                      std::span<const float> reach_weights,
+                                      float iteration_weight) {
+  assert(reach_weights.size() == node.hand_count);
 
-  for (size_t hand = 0; hand < hand_count; ++hand) {
-    size_t begin = index(hand, 0);
+  std::span<float> node_strategy = strategy_span(node);
+  std::span<float> node_strategy_sum = strategy_sum_span(node);
+  for (size_t hand = 0; hand < node.hand_count; ++hand) {
     float weight = reach_weights[hand] * iteration_weight;
-    for (size_t action = 0; action < action_count; ++action) {
-      strategy_sum[begin + action] += weight * strategy[begin + action];
+    size_t begin = hand * node.action_count;
+    for (size_t action = begin; action < begin + node.action_count; ++action) {
+      node_strategy_sum[action] += weight * node_strategy[action];
     }
   }
 }
 
-void DecisionNode::average_strategy(std::vector<float> &average) const {
-  average.resize(strategy_sum.size());
-  for (size_t hand = 0; hand < hand_count; ++hand) {
-    size_t begin = index(hand, 0);
+void SolverState::average_strategy(const DecisionNode &node,
+                                   std::vector<float> &average) const {
+  average.resize(node.entry_count());
+  std::span<const float> node_strategy_sum = strategy_sum_span(node);
+  for (size_t hand = 0; hand < node.hand_count; ++hand) {
+    size_t begin = hand * node.action_count;
     float total = 0.0F;
-    for (size_t action = 0; action < action_count; ++action) {
-      total += strategy_sum[begin + action];
+    for (size_t action = 0; action < node.action_count; ++action) {
+      total += node_strategy_sum[begin + action];
     }
 
     if (total > 0.0F) {
-      for (size_t action = 0; action < action_count; ++action) {
-        average[begin + action] = strategy_sum[begin + action] / total;
+      for (size_t action = 0; action < node.action_count; ++action) {
+        average[begin + action] = node_strategy_sum[begin + action] / total;
       }
     } else {
-      std::fill_n(average.begin() + begin, action_count,
-                  1.0F / static_cast<float>(action_count));
+      std::fill_n(average.begin() + begin, node.action_count,
+                  1.0F / static_cast<float>(node.action_count));
     }
   }
 }

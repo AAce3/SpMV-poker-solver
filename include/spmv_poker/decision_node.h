@@ -1,50 +1,68 @@
 #pragma once
 
+#include "spmv_poker/cards.h"
+
 #include <algorithm>
 #include <cassert>
 #include <stddef.h>
+#include <span>
 #include <vector>
 
 namespace spmv_poker {
 
 /**
- * Strategy and regret state for one decision point
+ * Describes one decision point's slice of the global solver state.
  *
- * Entries are stored in compact, hand-major order, i.e.
- * index = hand_index * action_count + action_index
+ * Entries within the slice are stored in hand-major order.
  */
 struct DecisionNode {
+  IndexRange entries;
   size_t hand_count;
   size_t action_count;
+
+  [[nodiscard]] size_t entry_count() const {
+    return entries.count;
+  }
+};
+
+struct SolverState {
   std::vector<float> regrets;
   std::vector<float> strategy;
   std::vector<float> strategy_sum;
 
-  DecisionNode(size_t hand_count, size_t action_count)
-      : hand_count(hand_count), action_count(action_count),
-        regrets(hand_count * action_count, 0.0F),
-        strategy(hand_count * action_count),
-        strategy_sum(hand_count * action_count, 0.0F) {
-    assert(action_count > 0);
-    std::fill(strategy.begin(), strategy.end(),
-              1.0F / static_cast<float>(action_count));
+  [[nodiscard]] std::span<float> regret_span(const DecisionNode &node) {
+    return node.entries.view(std::span(regrets));
   }
 
-  [[nodiscard]] size_t index(size_t hand_index, size_t action_index) const {
-    return hand_index * action_count + action_index;
+  [[nodiscard]] std::span<float> strategy_span(const DecisionNode &node) {
+    return node.entries.view(std::span(strategy));
   }
 
-  // use CFR+ to compute regrets
-  void apply_regret_deltas(const std::vector<float> &deltas) {
-    assert(deltas.size() == regrets.size());
-    for (size_t entry = 0; entry < regrets.size(); ++entry) {
-      regrets[entry] = std::max(0.0F, regrets[entry] + deltas[entry]);
+  [[nodiscard]] std::span<float> strategy_sum_span(const DecisionNode &node) {
+    return node.entries.view(std::span(strategy_sum));
+  }
+
+  [[nodiscard]] std::span<const float>
+  strategy_sum_span(const DecisionNode &node) const {
+    return node.entries.view(std::span(strategy_sum));
+  }
+
+  void apply_regret_deltas(const DecisionNode &node,
+                           std::span<const float> deltas) {
+    assert(deltas.size() == node.entry_count());
+    std::span<float> node_regrets = regret_span(node);
+    for (size_t entry = 0; entry < node_regrets.size(); ++entry) {
+      node_regrets[entry] =
+          std::max(0.0F, node_regrets[entry] + deltas[entry]);
     }
   }
-  void update_strategy();
-  void accumulate_strategy(const std::vector<float> &reach_weights,
+
+  void update_strategy(const DecisionNode &node);
+  void accumulate_strategy(const DecisionNode &node,
+                           std::span<const float> reach_weights,
                            float iteration_weight = 1.0F);
-  void average_strategy(std::vector<float> &average) const;
+  void average_strategy(const DecisionNode &node,
+                        std::vector<float> &average) const;
 };
 
 } // namespace spmv_poker
