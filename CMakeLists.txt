@@ -33,6 +33,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(poker_hand_evaluator)
 
 add_library(poker_core
+    src/decision_node.cpp
     src/range.cpp
     src/terminal.cpp
 )
@@ -47,3 +48,7 @@ enable_testing()
 add_executable(terminal_tests tests/terminal_test.cpp)
 target_link_libraries(terminal_tests PRIVATE poker_core)
 add_test(NAME terminal_tests COMMAND terminal_tests)
+
+add_executable(decision_node_tests tests/decision_node_test.cpp)
+target_link_libraries(decision_node_tests PRIVATE poker_core)
+add_test(NAME decision_node_tests COMMAND decision_node_tests)
