@@ -302,7 +302,7 @@ SpMV stands for Sparse Matrix-Vector Multiplication. It refers to multiplying a 
 
 A game tree is naturally sparse. Each node only connects to a few children, even though the full matrix contains an entry for every possible pair of nodes. For example, in the toy tree above, the transition matrix is mostly zeros, and only the actual tree edges contain useful values. Instead of storing the full matrix, SpMV stores only the nonzero entries. Then matrix-vector multiplication becomes a pass over these edges. 
 
-The advantage is that this avoids recursive tree traversal. Instead of walking the game tree node by node, we can process many edges in parallel. This is especially attractive on GPUs, which are designed for large batches of simple numeric operations. Note that many highly optimized SpMV routines exist already, for both GPU and for CPU. However, this approach requires more memory.
+The advantage is that this avoids recursive tree traversal. Instead of walking the game tree node by node, we can process many edges in parallel. This is especially attractive on GPUs, which are designed for large batches of simple numeric operations. And, many highly optimized SpMV routines exist already, for both GPU and for CPU. However, this approach requires more memory.
 
 
 ## Roadmap:
