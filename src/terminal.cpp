@@ -73,7 +73,7 @@ void TerminalTables::build_hand_table(uint64_t dead_cards) {
 void TerminalTables::reserve_runouts(size_t runout_count) {
   runouts.reserve(runout_count);
   ranked_hand_indices.reserve(runout_count);
-  runout_group_offsets.reserve(runout_count);
+  runout_group_ranges.reserve(runout_count);
 }
 
 void TerminalTables::add_runout(const std::array<uint8_t, 5> &board) {
@@ -103,8 +103,7 @@ void TerminalTables::add_runout(const std::array<uint8_t, 5> &board) {
 
   // keep only the sorted hand indices and the boundaries between ties
   std::array<uint16_t, FINAL_BOARD_HAND_COUNT> hand_indices;
-  runout_group_offsets.push_back(
-      static_cast<uint32_t>(group_boundaries.size()));
+  size_t boundary_begin = group_boundaries.size();
   group_boundaries.push_back(0);
   for (size_t index = 0; index < evaluated_hands.size(); ++index) {
     hand_indices[index] = evaluated_hands[index].hand_index;
@@ -114,6 +113,8 @@ void TerminalTables::add_runout(const std::array<uint8_t, 5> &board) {
     }
   }
   group_boundaries.push_back(static_cast<uint16_t>(hand_indices.size()));
+  runout_group_ranges.push_back(
+      IndexRange{boundary_begin, group_boundaries.size() - boundary_begin});
   ranked_hand_indices.push_back(std::move(hand_indices));
 }
 
@@ -146,10 +147,9 @@ void TerminalTables::apply_showdown(size_t runout_index,
                                     std::vector<float> &values) const {
   size_t hand_count = hand_table.size();
   auto &hand_indices = ranked_hand_indices[runout_index];
-  size_t boundary_begin = runout_group_offsets[runout_index];
-  size_t boundary_end = runout_index + 1 < runout_group_offsets.size()
-                            ? runout_group_offsets[runout_index + 1]
-                            : group_boundaries.size();
+  IndexRange boundary_range = runout_group_ranges[runout_index];
+  size_t boundary_begin = boundary_range.begin;
+  size_t boundary_end = boundary_range.begin + boundary_range.count;
   values.assign(hand_count, 0.0F);
 
   float total = 0.0F;

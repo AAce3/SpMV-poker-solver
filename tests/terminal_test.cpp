@@ -37,11 +37,9 @@ void apply_showdown_reference(
 ) {
     size_t hand_count = tables.hand_table.size();
     const auto& hand_indices = tables.ranked_hand_indices[runout_index];
-    size_t boundary_begin = tables.runout_group_offsets[runout_index];
-    size_t boundary_end =
-        runout_index + 1 < tables.runout_group_offsets.size()
-            ? tables.runout_group_offsets[runout_index + 1]
-            : tables.group_boundaries.size();
+    IndexRange boundary_range = tables.runout_group_ranges[runout_index];
+    size_t boundary_begin = boundary_range.begin;
+    size_t boundary_end = boundary_range.begin + boundary_range.count;
     std::vector<uint16_t> ranks(hand_count);
     values.assign(hand_count, 0.0F);
 
@@ -93,7 +91,10 @@ void test_river_runout() {
     check(tables.runouts.size() == 1, "river must have one runout");
     check(tables.ranked_hand_indices.size() == 1, "river must have one rank table");
     check(tables.ranked_hand_indices[0].size() == 1081, "all river hands must be ranked");
-    check(tables.runout_group_offsets == std::vector<uint32_t>{0}, "river groups start at zero");
+    check(tables.runout_group_ranges.size() == 1, "river has one group range");
+    check(tables.runout_group_ranges[0].begin == 0, "river groups start at zero");
+    check(tables.runout_group_ranges[0].count == tables.group_boundaries.size(),
+          "river group range includes every boundary");
     check(tables.group_boundaries.front() == 0, "groups must start at the first ranked hand");
     check(tables.group_boundaries.back() == 1081, "groups must end after all ranked hands");
 }

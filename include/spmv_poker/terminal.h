@@ -24,7 +24,7 @@ constexpr size_t FINAL_BOARD_HAND_COUNT = 1081;
  * groups of "tied" hands.
  *
  * group_boundaries separates each runout's ordered hands into these tie groups,
- * while runout_group_offsets identifies the boundaries belonging to each runout (a bit like CSR format)
+ * while runout_group_ranges identifies the boundaries belonging to each runout.
  * When computing showdown vales, we sweep over the groups to accumulate weaker and stronger
  * opponent weight, excluding ties and hands blocked by the current hand.
  */
@@ -33,7 +33,7 @@ struct TerminalTables {
   std::vector<std::array<uint8_t, 5>> runouts;
   std::vector<std::array<uint16_t, FINAL_BOARD_HAND_COUNT>> ranked_hand_indices;
   std::vector<uint16_t> group_boundaries;
-  std::vector<uint32_t> runout_group_offsets;
+  std::vector<IndexRange> runout_group_ranges;
 
   explicit TerminalTables(const std::array<uint8_t, 3> &flop);
   explicit TerminalTables(const std::array<uint8_t, 4> &turn);

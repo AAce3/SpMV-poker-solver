@@ -3,11 +3,22 @@
 #include <array>
 #include <stddef.h>
 #include <stdint.h>
+#include <span>
 #include <vector>
 
 namespace spmv_poker {
 
 constexpr size_t DECK_SIZE = 52;
+
+struct IndexRange {
+    size_t begin;
+    size_t count;
+
+    template <typename T>
+    [[nodiscard]] std::span<T> view(std::span<T> values) const {
+        return values.subspan(begin, count);
+    }
+};
 
 struct Hand {
     uint8_t first;
