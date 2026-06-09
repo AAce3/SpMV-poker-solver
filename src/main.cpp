@@ -1,5 +1,5 @@
 #include "spmv_poker/range.h"
-#include "spmv_poker/showdown.h"
+#include "spmv_poker/terminal.h"
 
 #include <array>
 #include <iostream>
@@ -7,7 +7,7 @@
 int main() {
     using namespace spmv_poker;
 
-    ShowdownTables tables(std::array<uint8_t, 4>{0, 5, 10, 15});
+    TerminalTables tables(std::array<uint8_t, 4>{0, 5, 10, 15});
     Range hero_range;
     Range villain_range;
     hero_range.set_uniform(tables.hand_table.size());

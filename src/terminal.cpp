@@ -1,4 +1,4 @@
-#include "spmv_poker/showdown.h"
+#include "spmv_poker/terminal.h"
 
 #include <phevaluator/phevaluator.h>
 
@@ -17,7 +17,7 @@ struct EvaluatedHand {
 
 } // namespace
 
-ShowdownTables::ShowdownTables(const std::array<uint8_t, 3> &flop) {
+TerminalTables::TerminalTables(const std::array<uint8_t, 3> &flop) {
   uint64_t dead_cards = make_mask(flop);
   build_hand_table(dead_cards);
   reserve_runouts((DECK_SIZE - flop.size()) * (DECK_SIZE - flop.size() - 1) /
@@ -36,7 +36,7 @@ ShowdownTables::ShowdownTables(const std::array<uint8_t, 3> &flop) {
   }
 }
 
-ShowdownTables::ShowdownTables(const std::array<uint8_t, 4> &turn) {
+TerminalTables::TerminalTables(const std::array<uint8_t, 4> &turn) {
   uint64_t dead_cards = make_mask(turn);
   build_hand_table(dead_cards);
   reserve_runouts(DECK_SIZE - turn.size());
@@ -49,13 +49,13 @@ ShowdownTables::ShowdownTables(const std::array<uint8_t, 4> &turn) {
   }
 }
 
-ShowdownTables::ShowdownTables(const std::array<uint8_t, 5> &river) {
+TerminalTables::TerminalTables(const std::array<uint8_t, 5> &river) {
   build_hand_table(make_mask(river));
   reserve_runouts(1);
   add_runout(river);
 }
 
-void ShowdownTables::build_hand_table(uint64_t dead_cards) {
+void TerminalTables::build_hand_table(uint64_t dead_cards) {
   hand_table.reserve(DECK_SIZE * (DECK_SIZE - 1) / 2);
 
   for (size_t first = 0; first < DECK_SIZE; ++first) {
@@ -70,13 +70,13 @@ void ShowdownTables::build_hand_table(uint64_t dead_cards) {
   }
 }
 
-void ShowdownTables::reserve_runouts(size_t runout_count) {
+void TerminalTables::reserve_runouts(size_t runout_count) {
   runouts.reserve(runout_count);
   ranked_hand_indices.reserve(runout_count);
   runout_group_offsets.reserve(runout_count);
 }
 
-void ShowdownTables::add_runout(const std::array<uint8_t, 5> &board) {
+void TerminalTables::add_runout(const std::array<uint8_t, 5> &board) {
   uint64_t board_mask = make_mask(board);
   runouts.push_back(board);
   std::array<EvaluatedHand, FINAL_BOARD_HAND_COUNT> evaluated_hands;
@@ -117,29 +117,54 @@ void ShowdownTables::add_runout(const std::array<uint8_t, 5> &board) {
   ranked_hand_indices.push_back(std::move(hand_indices));
 }
 
-void ShowdownTables::apply_showdown(size_t runout_index,
+void TerminalTables::apply_fold(const Range &opponent_range, float payoff,
+                                std::vector<float> &values) const {
+  float total = 0.0F;
+  std::array<float, DECK_SIZE> card_totals{};
+
+  for (size_t index = 0; index < hand_table.size(); ++index) {
+    const Hand &hand = hand_table[index];
+    float weight = opponent_range.weights[index];
+    total += weight;
+    card_totals[hand.first] += weight;
+    card_totals[hand.second] += weight;
+  }
+
+  values.resize(hand_table.size());
+  for (size_t index = 0; index < hand_table.size(); ++index) {
+    const Hand &hand = hand_table[index];
+    float compatible_weight =
+        total - card_totals[hand.first] - card_totals[hand.second] +
+        opponent_range.weights[index];
+    values[index] = payoff * compatible_weight;
+  }
+}
+
+void TerminalTables::apply_showdown(size_t runout_index,
                                     const Range &opponent_range,
-                                    std::vector<float> &showdown_values) const {
+                                    float win_payoff, float loss_payoff,
+                                    std::vector<float> &values) const {
   size_t hand_count = hand_table.size();
   auto &hand_indices = ranked_hand_indices[runout_index];
   size_t boundary_begin = runout_group_offsets[runout_index];
   size_t boundary_end = runout_index + 1 < runout_group_offsets.size()
                             ? runout_group_offsets[runout_index + 1]
                             : group_boundaries.size();
-  showdown_values.assign(hand_count, 0.0F);
+  values.assign(hand_count, 0.0F);
 
   float total = 0.0F;
   std::array<float, DECK_SIZE> card_totals{};
 
   // accumulate compatible opponent weight beaten by each hand
   for (size_t boundary = boundary_end - 1; boundary-- > boundary_begin;) {
-     size_t group_begin = group_boundaries[boundary];
-     size_t group_end = group_boundaries[boundary + 1];
+    size_t group_begin = group_boundaries[boundary];
+    size_t group_end = group_boundaries[boundary + 1];
     for (size_t index = group_begin; index < group_end; ++index) {
       uint16_t hand_index = hand_indices[index];
       const Hand &hand = hand_table[hand_index];
-      showdown_values[hand_index] =
-          total - card_totals[hand.first] - card_totals[hand.second];
+      values[hand_index] =
+          win_payoff *
+          (total - card_totals[hand.first] - card_totals[hand.second]);
     }
 
     for (size_t index = group_begin; index < group_end; ++index) {
@@ -163,8 +188,9 @@ void ShowdownTables::apply_showdown(size_t runout_index,
     for (size_t index = group_begin; index < group_end; ++index) {
       uint16_t hand_index = hand_indices[index];
       const Hand &hand = hand_table[hand_index];
-      showdown_values[hand_index] -=
-          total - card_totals[hand.first] - card_totals[hand.second];
+      values[hand_index] +=
+          loss_payoff *
+          (total - card_totals[hand.first] - card_totals[hand.second]);
     }
 
     for (size_t index = group_begin; index < group_end; ++index) {

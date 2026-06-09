@@ -34,7 +34,7 @@ FetchContent_MakeAvailable(poker_hand_evaluator)
 
 add_library(poker_core
     src/range.cpp
-    src/showdown.cpp
+    src/terminal.cpp
 )
 target_include_directories(poker_core PUBLIC include)
 target_link_libraries(poker_core PRIVATE pheval7)
@@ -44,6 +44,6 @@ target_link_libraries(poker_solver PRIVATE poker_core)
 
 enable_testing()
 
-add_executable(poker_core_tests tests/showdown_test.cpp)
-target_link_libraries(poker_core_tests PRIVATE poker_core)
-add_test(NAME poker_core_tests COMMAND poker_core_tests)
+add_executable(terminal_tests tests/terminal_test.cpp)
+target_link_libraries(terminal_tests PRIVATE poker_core)
+add_test(NAME terminal_tests COMMAND terminal_tests)
