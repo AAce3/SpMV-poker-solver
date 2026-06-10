@@ -1,7 +1,6 @@
 #include "spmv_poker/game_tree.h"
 
 #include <array>
-#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -42,12 +41,12 @@ void test_general_tree() {
   check(root_node.type == NodeType::Decision, "root is a decision");
   check(root_node.player == Player::Hero, "root stores acting player");
   check(root_node.decision_index == 0, "root maps to decision state");
-  std::span<const GameEdge> root_children = tree.children(root_node);
+  auto root_children = tree.children(root_node);
   check(root_children[0].child == fold, "action zero preserves child order");
   check(root_children[1].child == chance, "action one preserves child order");
 
   const GameNode &chance_node = tree.nodes[chance];
-  std::span<const GameEdge> runouts = tree.children(chance_node);
+  auto runouts = tree.children(chance_node);
   check(runouts[0].probability == 0.25F, "chance probability zero");
   check(runouts[1].probability == 0.75F, "chance probability one");
 

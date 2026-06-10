@@ -18,6 +18,16 @@ struct IndexRange {
     [[nodiscard]] std::span<T> view(std::span<T> values) const {
         return values.subspan(begin, count);
     }
+
+    template <typename T>
+    [[nodiscard]] std::span<T> view(std::vector<T>& values) const {
+        return std::span(values).subspan(begin, count);
+    }
+
+    template <typename T>
+    [[nodiscard]] std::span<const T> view(const std::vector<T>& values) const {
+        return std::span(values).subspan(begin, count);
+    }
 };
 
 struct Hand {

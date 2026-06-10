@@ -31,26 +31,26 @@ struct SolverState {
   std::vector<float> strategy_sum;
 
   [[nodiscard]] std::span<float> regret_span(const DecisionNode &node) {
-    return node.entries.view(std::span(regrets));
+    return node.entries.view(regrets);
   }
 
   [[nodiscard]] std::span<float> strategy_span(const DecisionNode &node) {
-    return node.entries.view(std::span(strategy));
+    return node.entries.view(strategy);
   }
 
   [[nodiscard]] std::span<float> strategy_sum_span(const DecisionNode &node) {
-    return node.entries.view(std::span(strategy_sum));
+    return node.entries.view(strategy_sum);
   }
 
   [[nodiscard]] std::span<const float>
   strategy_sum_span(const DecisionNode &node) const {
-    return node.entries.view(std::span(strategy_sum));
+    return node.entries.view(strategy_sum);
   }
 
   void apply_regret_deltas(const DecisionNode &node,
                            std::span<const float> deltas) {
     assert(deltas.size() == node.entry_count());
-    std::span<float> node_regrets = regret_span(node);
+    auto node_regrets = regret_span(node);
     for (size_t entry = 0; entry < node_regrets.size(); ++entry) {
       node_regrets[entry] =
           std::max(0.0F, node_regrets[entry] + deltas[entry]);

@@ -57,13 +57,13 @@ void test_cfr_plus_regret_matching() {
 
   std::array deltas{-2.0F, 4.0F, 3.0F, 1.0F};
   tree.state.apply_regret_deltas(node, deltas);
-  std::span<float> regrets = tree.state.regret_span(node);
+  auto regrets = tree.state.regret_span(node);
   check(regrets[0] == 0.0F, "CFR+ clamps negative regret");
   check(regrets[1] == 4.0F, "CFR+ accumulates positive regret");
 
   tree.state.update_strategy(node);
-  std::span<float> untouched_strategy = tree.state.strategy_span(untouched);
-  std::span<float> strategy = tree.state.strategy_span(node);
+  auto untouched_strategy = tree.state.strategy_span(untouched);
+  auto strategy = tree.state.strategy_span(node);
   check_close(untouched_strategy[0], 0.5F,
               "other decisions remain untouched");
   check_close(strategy[0], 0.0F, "negative regret gets zero probability");
@@ -75,7 +75,7 @@ void test_cfr_plus_regret_matching() {
 void test_average_strategy() {
   GameTree tree = make_two_decision_tree();
   DecisionNode &node = tree.decisions[1];
-  std::span<float> regrets = tree.state.regret_span(node);
+  auto regrets = tree.state.regret_span(node);
 
   std::array first_regrets{1.0F, 3.0F, 3.0F, 1.0F};
   std::copy(first_regrets.begin(), first_regrets.end(), regrets.begin());

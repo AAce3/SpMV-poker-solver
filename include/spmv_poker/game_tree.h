@@ -60,7 +60,7 @@ struct GameTree {
                               std::span<const NodeIndex> children);
 
   [[nodiscard]] std::span<const GameEdge> children(const GameNode &node) const {
-    return node.edge_range.view(std::span(edges));
+    return node.edge_range.view(edges);
   }
 };
 
