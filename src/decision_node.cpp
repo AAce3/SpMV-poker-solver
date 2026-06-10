@@ -5,14 +5,15 @@
 
 namespace spmv_poker {
 
-void SolverState::update_strategy(const DecisionNode &node) {
-  auto node_regrets = regret_span(node);
-  auto node_strategy = strategy_span(node);
+void SolverState::strategy(const DecisionNode &node,
+                           std::span<float> output) const {
+  assert(output.size() == node.entry_count());
+  auto node_regrets = node.entries.view(regrets);
   for (size_t hand = 0; hand < node.hand_count; ++hand) {
     auto hand_regrets =
         node_regrets.subspan(hand * node.action_count, node.action_count);
     auto hand_strategy =
-        node_strategy.subspan(hand * node.action_count, node.action_count);
+        output.subspan(hand * node.action_count, node.action_count);
     float positive_regret_sum = 0.0F;
     for (float regret : hand_regrets) {
       positive_regret_sum += std::max(0.0F, regret);
@@ -35,7 +36,8 @@ void SolverState::accumulate_strategy(const DecisionNode &node,
                                       float iteration_weight) {
   assert(reach_weights.size() == node.hand_count);
 
-  auto node_strategy = strategy_span(node);
+  std::vector<float> node_strategy(node.entry_count());
+  strategy(node, node_strategy);
   auto node_strategy_sum = strategy_sum_span(node);
   for (size_t hand = 0; hand < node.hand_count; ++hand) {
     float weight = reach_weights[hand] * iteration_weight;

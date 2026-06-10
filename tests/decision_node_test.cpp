@@ -45,9 +45,6 @@ void test_global_layout() {
         "global regrets start at zero");
   check(tree.state.strategy_sum == std::vector<float>(8, 0.0F),
         "global strategy sum starts at zero");
-  for (float probability : tree.state.strategy) {
-    check_close(probability, 0.5F, "decision strategies start uniform");
-  }
 }
 
 void test_cfr_plus_regret_matching() {
@@ -61,9 +58,10 @@ void test_cfr_plus_regret_matching() {
   check(regrets[0] == 0.0F, "CFR+ clamps negative regret");
   check(regrets[1] == 4.0F, "CFR+ accumulates positive regret");
 
-  tree.state.update_strategy(node);
-  auto untouched_strategy = tree.state.strategy_span(untouched);
-  auto strategy = tree.state.strategy_span(node);
+  std::vector<float> untouched_strategy(untouched.entry_count());
+  std::vector<float> strategy(node.entry_count());
+  tree.state.strategy(untouched, untouched_strategy);
+  tree.state.strategy(node, strategy);
   check_close(untouched_strategy[0], 0.5F,
               "other decisions remain untouched");
   check_close(strategy[0], 0.0F, "negative regret gets zero probability");
@@ -79,13 +77,11 @@ void test_average_strategy() {
 
   std::array first_regrets{1.0F, 3.0F, 3.0F, 1.0F};
   std::copy(first_regrets.begin(), first_regrets.end(), regrets.begin());
-  tree.state.update_strategy(node);
   std::array first_reach{1.0F, 0.0F};
   tree.state.accumulate_strategy(node, first_reach);
 
   std::array second_regrets{3.0F, 1.0F, 1.0F, 3.0F};
   std::copy(second_regrets.begin(), second_regrets.end(), regrets.begin());
-  tree.state.update_strategy(node);
   std::array second_reach{1.0F, 4.0F};
   tree.state.accumulate_strategy(node, second_reach, 2.0F);
 

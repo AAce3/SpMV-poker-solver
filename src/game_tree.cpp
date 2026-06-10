@@ -52,15 +52,13 @@ NodeIndex GameTree::add_decision_node(Player player,
 
   uint32_t decision_index = static_cast<uint32_t>(decisions.size());
   size_t offset = state.regrets.size();
-  size_t entry_count = hand_count * children.size();
+  size_t decision_hand_count = hand_count_for(player);
+  size_t entry_count = decision_hand_count * children.size();
   state.regrets.resize(offset + entry_count, 0.0F);
-  state.strategy.resize(offset + entry_count);
   state.strategy_sum.resize(offset + entry_count, 0.0F);
-  std::fill(state.strategy.begin() + offset, state.strategy.end(),
-            1.0F / static_cast<float>(children.size()));
   decisions.push_back(DecisionNode{
       .entries = {offset, entry_count},
-      .hand_count = hand_count,
+      .hand_count = decision_hand_count,
       .action_count = children.size(),
   });
 

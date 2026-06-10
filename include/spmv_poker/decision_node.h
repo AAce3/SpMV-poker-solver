@@ -27,15 +27,10 @@ struct DecisionNode {
 
 struct SolverState {
   std::vector<float> regrets;
-  std::vector<float> strategy;
   std::vector<float> strategy_sum;
 
   [[nodiscard]] std::span<float> regret_span(const DecisionNode &node) {
     return node.entries.view(regrets);
-  }
-
-  [[nodiscard]] std::span<float> strategy_span(const DecisionNode &node) {
-    return node.entries.view(strategy);
   }
 
   [[nodiscard]] std::span<float> strategy_sum_span(const DecisionNode &node) {
@@ -57,7 +52,7 @@ struct SolverState {
     }
   }
 
-  void update_strategy(const DecisionNode &node);
+  void strategy(const DecisionNode &node, std::span<float> output) const;
   void accumulate_strategy(const DecisionNode &node,
                            std::span<const float> reach_weights,
                            float iteration_weight = 1.0F);

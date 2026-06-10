@@ -10,6 +10,15 @@ namespace spmv_poker {
 
 constexpr size_t DECK_SIZE = 52;
 
+enum class Player : uint8_t {
+    Hero,
+    Villain,
+};
+
+[[nodiscard]] constexpr Player opponent(Player player) {
+    return player == Player::Hero ? Player::Villain : Player::Hero;
+}
+
 struct IndexRange {
     size_t begin;
     size_t count;
@@ -34,6 +43,8 @@ struct Hand {
     uint8_t first;
     uint8_t second;
     uint64_t mask;
+
+    bool operator==(const Hand&) const = default;
 };
 
 [[nodiscard]] constexpr uint64_t card_mask(uint8_t card) {

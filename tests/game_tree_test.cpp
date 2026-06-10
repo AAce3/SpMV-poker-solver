@@ -75,12 +75,29 @@ void test_decision_offsets_survive_state_growth() {
         "decision offsets survive global state growth");
 }
 
+void test_player_specific_decision_sizes() {
+  GameTree tree(2, 3);
+  NodeIndex fold = tree.add_fold_node(-1.0F);
+  std::array children{fold, fold};
+
+  tree.add_decision_node(Player::Hero, children);
+  tree.add_decision_node(Player::Villain, children);
+
+  check(tree.decisions[0].hand_count == 2,
+        "hero decision uses hero hand count");
+  check(tree.decisions[1].hand_count == 3,
+        "villain decision uses villain hand count");
+  check(tree.state.regrets.size() == 10,
+        "decision state uses player-specific hand counts");
+}
+
 } // namespace
 
 int main() {
   try {
     test_general_tree();
     test_decision_offsets_survive_state_growth();
+    test_player_specific_decision_sizes();
   } catch (const std::exception &error) {
     std::cerr << "Test failure: " << error.what() << '\n';
     return EXIT_FAILURE;

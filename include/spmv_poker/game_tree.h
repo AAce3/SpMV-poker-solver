@@ -2,6 +2,7 @@
 
 #include "spmv_poker/decision_node.h"
 
+#include <array>
 #include <stdint.h>
 #include <span>
 #include <vector>
@@ -17,11 +18,6 @@ enum class NodeType : uint8_t {
   Chance,
   Fold,
   Showdown,
-};
-
-enum class Player : uint8_t {
-  Hero,
-  Villain,
 };
 
 struct GameEdge {
@@ -43,14 +39,17 @@ struct GameNode {
 };
 
 struct GameTree {
-  size_t hand_count;
+  std::array<size_t, 2> player_hand_counts;
   NodeIndex root = 0;
   std::vector<GameNode> nodes;
   std::vector<GameEdge> edges;
   std::vector<DecisionNode> decisions;
   SolverState state;
 
-  explicit GameTree(size_t hand_count) : hand_count(hand_count) {}
+  explicit GameTree(size_t hand_count)
+      : player_hand_counts{hand_count, hand_count} {}
+  GameTree(size_t hero_hand_count, size_t villain_hand_count)
+      : player_hand_counts{hero_hand_count, villain_hand_count} {}
 
   NodeIndex add_fold_node(float payoff);
   NodeIndex add_showdown_node(uint32_t runout_index, float win_payoff,
@@ -61,6 +60,10 @@ struct GameTree {
 
   [[nodiscard]] std::span<const GameEdge> children(const GameNode &node) const {
     return node.edge_range.view(edges);
+  }
+
+  [[nodiscard]] size_t hand_count_for(Player player) const {
+    return player_hand_counts[static_cast<size_t>(player)];
   }
 };
 
