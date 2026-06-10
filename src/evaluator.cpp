@@ -112,7 +112,7 @@ void RecursiveEvaluator::evaluate_node(NodeIndex node_index, Player player,
                         board_mask) == 0;
           filtered_range[hand] =
               valid ? opponent_range[hand] *
-                          strategy[hand * decision.action_count + action]
+                          strategy[decision.entry(action, hand)]
                     : 0.0F;
         }
         child_range = filtered_range;
@@ -123,7 +123,7 @@ void RecursiveEvaluator::evaluate_node(NodeIndex node_index, Player player,
       for (size_t hand = 0; hand < node_values.size(); ++hand) {
         float action_weight =
             node.player == player
-                ? strategy[hand * decision.action_count + action]
+                ? strategy[decision.entry(action, hand)]
                 : 1.0F;
         node_values[hand] += action_weight * child_values[hand];
       }
@@ -189,13 +189,13 @@ void RecursiveEvaluator::cfr_update_node(
         for (size_t hand = 0; hand < player_reach.size(); ++hand) {
           child_reach[hand] =
               valid_player_reach[hand] *
-              strategy[hand * decision.action_count + action];
+              strategy[decision.entry(action, hand)];
         }
         cfr_update_node(children[action].child, player, child_reach,
                         opponent_reach, child_values, chance_reach,
                         iteration_weight, board_mask);
         for (size_t hand = 0; hand < node_values.size(); ++hand) {
-          size_t entry = hand * decision.action_count + action;
+          size_t entry = decision.entry(action, hand);
           action_values[entry] = child_values[hand];
           node_values[hand] += strategy[entry] * child_values[hand];
         }
@@ -204,7 +204,7 @@ void RecursiveEvaluator::cfr_update_node(
       std::vector<float> regret_deltas(decision.entry_count());
       for (size_t hand = 0; hand < node_values.size(); ++hand) {
         for (size_t action = 0; action < decision.action_count; ++action) {
-          size_t entry = hand * decision.action_count + action;
+          size_t entry = decision.entry(action, hand);
           bool valid =
               (terminals.hands(player)[hand].mask & board_mask) == 0;
           regret_deltas[entry] =
@@ -225,7 +225,7 @@ void RecursiveEvaluator::cfr_update_node(
             (terminals.hands(node.player)[hand].mask & board_mask) == 0;
         filtered_range[hand] =
             valid ? opponent_reach[hand] *
-                        strategy[hand * decision.action_count + action]
+                        strategy[decision.entry(action, hand)]
                   : 0.0F;
       }
       cfr_update_node(children[action].child, player, player_reach,
@@ -339,7 +339,7 @@ void RecursiveEvaluator::best_response_node(
             (terminals.hands(node.player)[hand].mask & board_mask) == 0;
         filtered_range[hand] =
             valid ? opponent_reach[hand] *
-                        strategy[hand * decision.action_count + action]
+                        strategy[decision.entry(action, hand)]
                   : 0.0F;
       }
       best_response_node(children[action].child, player, filtered_range,

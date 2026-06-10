@@ -10,10 +10,9 @@ void SolverState::strategy(const DecisionNode &node,
   assert(output.size() == node.entry_count());
   auto node_regrets = node.entries.view(regrets);
   for (size_t hand = 0; hand < node.hand_count; ++hand) {
-    auto hand_regrets =
-        node_regrets.subspan(hand * node.action_count, node.action_count);
-    auto hand_strategy =
-        output.subspan(hand * node.action_count, node.action_count);
+    size_t begin = node.entry(0, hand);
+    auto hand_regrets = node_regrets.subspan(begin, node.action_count);
+    auto hand_strategy = output.subspan(begin, node.action_count);
     float positive_regret_sum = 0.0F;
     for (float regret : hand_regrets) {
       positive_regret_sum += std::max(0.0F, regret);
@@ -41,9 +40,9 @@ void SolverState::accumulate_strategy(const DecisionNode &node,
   auto node_strategy_sum = strategy_sum_span(node);
   for (size_t hand = 0; hand < node.hand_count; ++hand) {
     float weight = reach_weights[hand] * iteration_weight;
-    size_t begin = hand * node.action_count;
-    for (size_t action = begin; action < begin + node.action_count; ++action) {
-      node_strategy_sum[action] += weight * node_strategy[action];
+    size_t begin = node.entry(0, hand);
+    for (size_t entry = begin; entry < begin + node.action_count; ++entry) {
+      node_strategy_sum[entry] += weight * node_strategy[entry];
     }
   }
 }
@@ -53,7 +52,7 @@ void SolverState::average_strategy(const DecisionNode &node,
   average.resize(node.entry_count());
   auto node_strategy_sum = strategy_sum_span(node);
   for (size_t hand = 0; hand < node.hand_count; ++hand) {
-    size_t begin = hand * node.action_count;
+    size_t begin = node.entry(0, hand);
     float total = 0.0F;
     for (size_t action = 0; action < node.action_count; ++action) {
       total += node_strategy_sum[begin + action];

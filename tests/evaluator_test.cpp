@@ -122,8 +122,8 @@ void test_player_decision_weighting() {
   DecisionNode &decision = tree.decisions[0];
   auto regrets = tree.state.regret_span(decision);
   for (size_t hand = 0; hand < tree.hand_count_for(Player::Hero); ++hand) {
-    regrets[hand * 2] = 0.75F;
-    regrets[hand * 2 + 1] = 0.25F;
+    regrets[decision.entry(0, hand)] = 0.75F;
+    regrets[decision.entry(1, hand)] = 0.25F;
   }
   Range opponent_range = uniform_range(terminals.hands(Player::Villain));
   RecursiveEvaluator evaluator{tree, terminals};
@@ -147,12 +147,12 @@ void test_opponent_decision_updates_range() {
   auto regrets = tree.state.regret_span(decision);
   size_t villain_hand_count = tree.hand_count_for(Player::Villain);
   for (size_t hand = 0; hand < villain_hand_count / 2; ++hand) {
-    regrets[hand * 2] = 1.0F;
-    regrets[hand * 2 + 1] = 0.0F;
+    regrets[decision.entry(0, hand)] = 1.0F;
+    regrets[decision.entry(1, hand)] = 0.0F;
   }
   for (size_t hand = villain_hand_count / 2; hand < villain_hand_count; ++hand) {
-    regrets[hand * 2] = 0.0F;
-    regrets[hand * 2 + 1] = 1.0F;
+    regrets[decision.entry(0, hand)] = 0.0F;
+    regrets[decision.entry(1, hand)] = 1.0F;
   }
 
   Range opponent_range = uniform_range(terminals.hands(Player::Villain));
@@ -160,7 +160,7 @@ void test_opponent_decision_updates_range() {
   filtered_range.hands = opponent_range.hands;
   filtered_range.weights.resize(villain_hand_count);
   for (size_t hand = 0; hand < villain_hand_count; ++hand) {
-    filtered_range.weights[hand] = regrets[hand * 2];
+    filtered_range.weights[hand] = regrets[decision.entry(0, hand)];
   }
   RecursiveEvaluator evaluator{tree, terminals};
 
@@ -195,8 +195,10 @@ void test_player_local_ranges() {
   tree.root = tree.add_decision_node(Player::Villain, children);
   auto regrets = tree.state.regret_span(tree.decisions[0]);
   for (size_t hand = 0; hand < villain.weights.size(); ++hand) {
-    regrets[hand * 2] = hand % 2 == 0 ? 1.0F : 0.0F;
-    regrets[hand * 2 + 1] = hand % 2 == 0 ? 0.0F : 1.0F;
+    regrets[tree.decisions[0].entry(0, hand)] =
+        hand % 2 == 0 ? 1.0F : 0.0F;
+    regrets[tree.decisions[0].entry(1, hand)] =
+        hand % 2 == 0 ? 0.0F : 1.0F;
   }
   RecursiveEvaluator evaluator{tree, terminals};
 
@@ -239,13 +241,13 @@ void test_cfr_update_player_decision() {
   for (size_t hand = 0; hand < hero_range.hands.size(); ++hand) {
     check_close(actual[hand], 0.5F * win_values[hand],
                 "CFR returns the pre-update strategy value");
-    check_close(regrets[hand * 2], 0.5F * win_values[hand],
+    check_close(regrets[decision.entry(0, hand)], 0.5F * win_values[hand],
                 "better action gains regret");
-    check_close(regrets[hand * 2 + 1], 0.0F,
+    check_close(regrets[decision.entry(1, hand)], 0.0F,
                 "CFR+ clamps worse action regret");
-    check_close(strategy_sum[hand * 2], 0.5F,
+    check_close(strategy_sum[decision.entry(0, hand)], 0.5F,
                 "average strategy accumulates current action zero");
-    check_close(strategy_sum[hand * 2 + 1], 0.5F,
+    check_close(strategy_sum[decision.entry(1, hand)], 0.5F,
                 "average strategy accumulates current action one");
   }
 
@@ -253,9 +255,9 @@ void test_cfr_update_player_decision() {
   for (size_t hand = 0; hand < hero_range.hands.size(); ++hand) {
     check_close(actual[hand], win_values[hand],
                 "next CFR update uses updated strategy");
-    check_close(strategy_sum[hand * 2], 1.5F,
+    check_close(strategy_sum[decision.entry(0, hand)], 1.5F,
                 "average strategy accumulates updated action zero");
-    check_close(strategy_sum[hand * 2 + 1], 0.5F,
+    check_close(strategy_sum[decision.entry(1, hand)], 0.5F,
                 "unused action retains previous strategy mass");
   }
 }
@@ -289,13 +291,13 @@ void test_cfr_update_only_updates_selected_player() {
   for (size_t hand = 0; hand < villain_range.hands.size(); ++hand) {
     check_close(values[hand], 0.5F * fold_values[hand],
                 "Villain CFR value uses Villain perspective");
-    check_close(regrets[hand * 2], 0.0F,
+    check_close(regrets[decision.entry(0, hand)], 0.0F,
                 "losing action regret is clamped");
-    check_close(regrets[hand * 2 + 1], -0.5F * fold_values[hand],
+    check_close(regrets[decision.entry(1, hand)], -0.5F * fold_values[hand],
                 "better Villain action gains regret");
-    check_close(strategy_sum[hand * 2], 0.5F,
+    check_close(strategy_sum[decision.entry(0, hand)], 0.5F,
                 "Villain average strategy accumulates action zero");
-    check_close(strategy_sum[hand * 2 + 1], 0.5F,
+    check_close(strategy_sum[decision.entry(1, hand)], 0.5F,
                 "Villain average strategy accumulates action one");
   }
 }
@@ -330,17 +332,19 @@ void test_cfr_chance_weights_strategy_sum() {
   std::vector<float> win_values;
   terminals.apply_fold(Player::Hero, villain_range, 1.0F, win_values);
   for (size_t hand = 0; hand < hero_range.hands.size(); ++hand) {
-    check_close(first_sum[hand * 2], 0.25F,
+    check_close(first_sum[tree.decisions[0].entry(0, hand)], 0.25F,
                 "first chance child weights average strategy");
-    check_close(first_sum[hand * 2 + 1], 0.25F,
+    check_close(first_sum[tree.decisions[0].entry(1, hand)], 0.25F,
                 "first chance child weights every action");
-    check_close(second_sum[hand * 2], 0.75F,
+    check_close(second_sum[tree.decisions[1].entry(0, hand)], 0.75F,
                 "second chance child weights average strategy");
-    check_close(second_sum[hand * 2 + 1], 0.75F,
+    check_close(second_sum[tree.decisions[1].entry(1, hand)], 0.75F,
                 "second chance child weights every action");
-    check_close(first_regrets[hand * 2], 0.125F * win_values[hand],
+    check_close(first_regrets[tree.decisions[0].entry(0, hand)],
+                0.125F * win_values[hand],
                 "first chance child weights regret");
-    check_close(second_regrets[hand * 2], 0.375F * win_values[hand],
+    check_close(second_regrets[tree.decisions[1].entry(0, hand)],
+                0.375F * win_values[hand],
                 "second chance child weights regret");
   }
 }
@@ -370,13 +374,13 @@ void test_cfr_iteration_updates_both_players() {
   auto hero_sum = tree.state.strategy_sum_span(tree.decisions[0]);
   auto villain_sum = tree.state.strategy_sum_span(tree.decisions[1]);
   for (size_t hand = 0; hand < hero_range.hands.size(); ++hand) {
-    check_close(hero_sum[hand * 2], 0.25F,
+    check_close(hero_sum[tree.decisions[0].entry(0, hand)], 0.25F,
                 "CFR iteration accumulates Hero strategy");
-    check_close(hero_sum[hand * 2 + 1], 0.25F,
+    check_close(hero_sum[tree.decisions[0].entry(1, hand)], 0.25F,
                 "CFR iteration accumulates every Hero action");
-    check_close(villain_sum[hand * 2], 0.25F,
+    check_close(villain_sum[tree.decisions[1].entry(0, hand)], 0.25F,
                 "CFR iteration accumulates Villain strategy");
-    check_close(villain_sum[hand * 2 + 1], 0.25F,
+    check_close(villain_sum[tree.decisions[1].entry(1, hand)], 0.25F,
                 "CFR iteration accumulates every Villain action");
   }
 }
@@ -494,7 +498,7 @@ void test_turn_fixture_skips_blocked_decision_hands() {
             checked_blocked_hand = true;
             for (size_t action = 0; action < decision.action_count; ++action) {
               check_close(
-                  strategy_sum[hand * decision.action_count + action], 0.0F,
+                  strategy_sum[decision.entry(action, hand)], 0.0F,
                   "blocked runout hand accumulates no strategy");
             }
           }

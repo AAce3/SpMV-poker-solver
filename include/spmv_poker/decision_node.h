@@ -23,6 +23,12 @@ struct DecisionNode {
   [[nodiscard]] size_t entry_count() const {
     return entries.count;
   }
+
+  [[nodiscard]] size_t entry(size_t action, size_t hand) const {
+    assert(action < action_count);
+    assert(hand < hand_count);
+    return hand * action_count + action;
+  }
 };
 
 struct SolverState {
