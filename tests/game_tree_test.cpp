@@ -91,6 +91,28 @@ void test_player_specific_decision_sizes() {
         "decision state uses player-specific hand counts");
 }
 
+void test_deal_node_and_board_mask() {
+  GameTree tree(2);
+  NodeIndex first = tree.add_fold_node(1.0F);
+  NodeIndex second = tree.add_fold_node(1.0F);
+  std::array children{
+      GameEdge{.child = first,
+               .probability = 1.0F / 44.0F,
+               .dealt_mask = card_mask(7)},
+      GameEdge{.child = second,
+               .probability = 1.0F / 44.0F,
+               .dealt_mask = card_mask(8)},
+  };
+  tree.root = tree.add_card_deal_node(children);
+
+  check(tree.nodes[tree.root].type == NodeType::Chance,
+        "card deal uses chance node type");
+  check(tree.nodes[tree.root].chance_kind == ChanceKind::CardDeal,
+        "chance node stores card-deal semantics");
+  check(tree.children(tree.nodes[tree.root])[0].dealt_mask == card_mask(7),
+        "card-deal edge stores dealt card mask");
+}
+
 } // namespace
 
 int main() {
@@ -98,6 +120,7 @@ int main() {
     test_general_tree();
     test_decision_offsets_survive_state_growth();
     test_player_specific_decision_sizes();
+    test_deal_node_and_board_mask();
   } catch (const std::exception &error) {
     std::cerr << "Test failure: " << error.what() << '\n';
     return EXIT_FAILURE;

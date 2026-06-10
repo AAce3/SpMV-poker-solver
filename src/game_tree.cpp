@@ -28,6 +28,7 @@ NodeIndex GameTree::add_chance_node(std::span<const GameEdge> children) {
   for (const GameEdge &edge : children) {
     assert(edge.child < nodes.size());
     assert(edge.probability >= 0.0F);
+    assert(edge.dealt_mask == 0);
     probability_sum += edge.probability;
   }
   assert(std::abs(probability_sum - 1.0F) < 0.00001F);
@@ -37,6 +38,23 @@ NodeIndex GameTree::add_chance_node(std::span<const GameEdge> children) {
   edges.insert(edges.end(), children.begin(), children.end());
   nodes.push_back(GameNode{.type = NodeType::Chance,
                            .edge_range = {edge_begin, children.size()}});
+  return index;
+}
+
+NodeIndex GameTree::add_card_deal_node(std::span<const GameEdge> children) {
+  assert(!children.empty());
+  for (const GameEdge &edge : children) {
+    assert(edge.child < nodes.size());
+    assert(edge.probability >= 0.0F);
+    assert(edge.dealt_mask != 0);
+  }
+
+  NodeIndex index = static_cast<NodeIndex>(nodes.size());
+  uint32_t edge_begin = static_cast<uint32_t>(edges.size());
+  edges.insert(edges.end(), children.begin(), children.end());
+  nodes.push_back(GameNode{.type = NodeType::Chance,
+                           .edge_range = {edge_begin, children.size()},
+                           .chance_kind = ChanceKind::CardDeal});
   return index;
 }
 
@@ -62,11 +80,10 @@ NodeIndex GameTree::add_decision_node(Player player,
       .action_count = children.size(),
   });
 
-  nodes.push_back(
-      GameNode{.type = NodeType::Decision,
-               .edge_range = {edge_begin, children.size()},
-               .decision_index = decision_index,
-               .player = player});
+  nodes.push_back(GameNode{.type = NodeType::Decision,
+                           .edge_range = {edge_begin, children.size()},
+                           .decision_index = decision_index,
+                           .player = player});
   return index;
 }
 

@@ -20,9 +20,15 @@ enum class NodeType : uint8_t {
   Showdown,
 };
 
+enum class ChanceKind : uint8_t {
+  Probability,
+  CardDeal,
+};
+
 struct GameEdge {
   NodeIndex child;
   float probability;
+  uint64_t dealt_mask = 0;
 };
 
 // nodes store indices into a global tree vector
@@ -33,6 +39,7 @@ struct GameNode {
   uint32_t decision_index = NO_DECISION;
   Player player = Player::Hero;
   uint32_t runout_index = 0;
+  ChanceKind chance_kind = ChanceKind::Probability;
   float payoff = 0.0F;
   float win_payoff = 0.0F;
   float loss_payoff = 0.0F;
@@ -55,6 +62,7 @@ struct GameTree {
   NodeIndex add_showdown_node(uint32_t runout_index, float win_payoff,
                               float loss_payoff);
   NodeIndex add_chance_node(std::span<const GameEdge> children);
+  NodeIndex add_card_deal_node(std::span<const GameEdge> children);
   NodeIndex add_decision_node(Player player,
                               std::span<const NodeIndex> children);
 

@@ -35,6 +35,7 @@ FetchContent_MakeAvailable(poker_hand_evaluator)
 add_library(poker_core
     src/decision_node.cpp
     src/evaluator.cpp
+    src/game_config.cpp
     src/game_tree.cpp
     src/range.cpp
     src/terminal.cpp

@@ -10,32 +10,55 @@ namespace spmv_poker {
 
 /**
  * Recursively evaluates the fixed strategy in a game tree
- *
- * values, opponent reach weights, and strategies use recursion-depth scratch
  */
 struct RecursiveEvaluator {
-  const GameTree &tree;
+  GameTree &tree;
   const TerminalTables &terminals;
-  std::vector<float> value_scratch;
-  std::vector<float> reach_scratch;
-  std::vector<float> strategy_scratch;
-  size_t value_stride = 0;
-  size_t reach_stride = 0;
-  size_t strategy_stride = 0;
 
-  RecursiveEvaluator(const GameTree &tree, const TerminalTables &terminals)
+  RecursiveEvaluator(GameTree &tree, const TerminalTables &terminals)
       : tree(tree), terminals(terminals) {}
 
   void evaluate(Player player, const Range &opponent_range,
                 std::vector<float> &values);
+  void cfr_update(Player player, const Range &player_range,
+                  const Range &opponent_range, std::vector<float> &values,
+                  float iteration_weight = 1.0F);
+  void cfr_iteration(const Range &hero_range, const Range &villain_range,
+                     float iteration_weight = 1.0F);
+  void best_response(Player player, const Range &opponent_range,
+                     std::vector<float> &values,
+                     bool use_average_strategy = true);
+  [[nodiscard]] float best_response_value(Player player,
+                                          const Range &player_range,
+                                          const Range &opponent_range,
+                                          bool use_average_strategy = true);
+  [[nodiscard]] float exploitability(const Range &hero_range,
+                                     const Range &villain_range,
+                                     bool use_average_strategy = true);
 
 private:
-  [[nodiscard]] std::span<float> values(size_t depth);
-  [[nodiscard]] std::span<float> reach(size_t depth);
-  [[nodiscard]] std::span<float> strategy(size_t depth,
-                                          const DecisionNode &node);
-  void evaluate_node(NodeIndex node_index, Player player, size_t depth);
-  [[nodiscard]] size_t maximum_depth(NodeIndex node_index) const;
+  void evaluate_node(NodeIndex node_index, Player player,
+                     std::span<const float> opponent_range,
+                     std::vector<float> &values, uint64_t board_mask);
+  void cfr_update_node(NodeIndex node_index, Player player,
+                       std::span<const float> player_reach,
+                       std::span<const float> opponent_reach,
+                       std::vector<float> &values, float chance_reach,
+                       float iteration_weight, uint64_t board_mask);
+  void best_response_node(NodeIndex node_index, Player player,
+                          std::span<const float> opponent_reach,
+                          std::vector<float> &values,
+                          bool use_average_strategy, uint64_t board_mask);
+  void terminal_fold(const GameNode &node, Player player,
+                     std::span<const float> opponent_reach,
+                     std::vector<float> &values, uint64_t board_mask) const;
+  void terminal_showdown(const GameNode &node, Player player,
+                         std::span<const float> opponent_reach,
+                         std::vector<float> &values,
+                         uint64_t board_mask) const;
+  void decision_strategy(const DecisionNode &decision,
+                         bool use_average_strategy,
+                         std::vector<float> &strategy) const;
 };
 
 } // namespace spmv_poker
