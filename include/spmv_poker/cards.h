@@ -10,6 +10,9 @@ namespace spmv_poker {
 
 constexpr size_t DECK_SIZE = 52;
 
+using NodeIndex = uint32_t;
+using BoardIndex = uint32_t;
+
 enum class Player : uint8_t {
     Hero,
     Villain,

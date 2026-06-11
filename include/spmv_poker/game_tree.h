@@ -9,8 +9,6 @@
 
 namespace spmv_poker {
 
-using NodeIndex = uint32_t;
-
 constexpr uint32_t NO_DECISION = UINT32_MAX;
 
 enum class NodeType : uint8_t {
