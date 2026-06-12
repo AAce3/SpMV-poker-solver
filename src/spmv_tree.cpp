@@ -56,27 +56,47 @@ uint8_t select_available_card(uint64_t board_mask, BoardIndex index) {
   return select_set_bit(available_cards, index);
 }
 
+BoardIndex compressed_card_index(uint64_t board_mask, uint8_t card) {
+  assert(card < DECK_SIZE);
+  assert((board_mask & card_mask(card)) == 0);
+  uint64_t lower_cards = card == 0 ? 0 : card_mask(card) - 1;
+  return card -
+         static_cast<BoardIndex>(std::popcount(board_mask & lower_cards));
+}
+
+uint8_t card_at_compressed_index(uint64_t board_mask, BoardIndex index) {
+  // CUDA should implement this select operation with __fns.
+  return select_available_card(board_mask, index);
+}
+
 } // namespace
 
 NodeIndex StreetTopology::add_showdown_node(float win_payoff,
                                             float loss_payoff) {
+  assert(boundary_count == 0);
+  assert(nodes.size() == showdown_count);
   NodeIndex index = static_cast<NodeIndex>(nodes.size());
   nodes.push_back(StreetNode{.type = StreetNodeType::Showdown,
                              .win_payoff = win_payoff,
                              .loss_payoff = loss_payoff});
+  ++showdown_count;
   return index;
 }
 
 NodeIndex StreetTopology::add_boundary_node() {
+  assert(nodes.size() == showdown_count + boundary_count);
   NodeIndex index = static_cast<NodeIndex>(nodes.size());
   nodes.push_back(StreetNode{.type = StreetNodeType::StreetBoundary});
+  ++boundary_count;
   return index;
 }
 
-NodeIndex StreetTopology::add_player_node(
-    Player player, std::span<const NodeIndex> child_nodes,
-    std::optional<float> fold_payoff) {
+NodeIndex
+StreetTopology::add_player_node(Player player,
+                                std::span<const NodeIndex> child_nodes,
+                                std::optional<float> fold_payoff) {
   assert(!child_nodes.empty() || fold_payoff.has_value());
+  assert(nodes.size() >= showdown_count + boundary_count);
   for (NodeIndex child : child_nodes) {
     assert(child < nodes.size());
   }
@@ -84,36 +104,46 @@ NodeIndex StreetTopology::add_player_node(
   NodeIndex index = static_cast<NodeIndex>(nodes.size());
   size_t child_begin = children.size();
   children.insert(children.end(), child_nodes.begin(), child_nodes.end());
+  for (NodeIndex child : child_nodes) {
+    if (nodes[child].type == StreetNodeType::Player) {
+      child_endpoints.push_back(INVALID_INDEX);
+    } else {
+      child_endpoints.push_back(endpoint_count++);
+      endpoint_nodes.push_back(child);
+    }
+  }
 
-  size_t hand_count = hand_count_for(player);
+  size_t aligned_hand_count = padded_hand_count_for(player);
+  size_t player_index = static_cast<size_t>(player);
   size_t cfr_offset_within_board = state_entries_per_board;
   size_t action_count =
       child_nodes.size() + static_cast<size_t>(fold_payoff.has_value());
-  state_entries_per_board += hand_count * action_count;
-
+  state_entries_per_board += aligned_hand_count * action_count;
+  size_t fold_index = INVALID_INDEX;
+  if (fold_payoff.has_value()) {
+    fold_index = fold_payoffs.size();
+    fold_payoffs.push_back(*fold_payoff);
+  }
   nodes.push_back(StreetNode{
       .type = StreetNodeType::Player,
       .child_range = {child_begin, child_nodes.size()},
       .player = player,
       .cfr_offset_within_board = cfr_offset_within_board,
-      .fold_payoff =
-          fold_payoff.value_or(std::numeric_limits<float>::quiet_NaN()),
+      .padded_hand_count = aligned_hand_count,
+      .fold_index = fold_index,
+      .reach_index = player_reach_counts[player_index]++,
   });
   return index;
 }
 
-StreetGame::StreetGame(StreetTopology topology, uint64_t flop_mask)
+StreetTree::StreetTree(StreetTopology topology, uint64_t flop_mask)
     : topology(std::move(topology)), board_index(flop_mask),
-      state{
-          .regrets =
-              std::vector<float>(board_index.board_count(this->topology.street) *
-                                     this->topology.state_entries_per_board,
-                                 0.0F),
-          .strategy_sum =
-              std::vector<float>(board_index.board_count(this->topology.street) *
-                                     this->topology.state_entries_per_board,
-                                 0.0F),
-      } {}
+      regrets(board_index.board_count(this->topology.street) *
+                  this->topology.state_entries_per_board,
+              0.0F),
+      cumulative_strategy(board_index.board_count(this->topology.street) *
+                              this->topology.state_entries_per_board,
+                          0.0F) {}
 
 size_t RunoutIndex::board_count(Street street) const {
   switch (street) {
@@ -131,21 +161,6 @@ size_t RunoutIndex::board_count(Street street) const {
 size_t RunoutIndex::child_count(Street street) const {
   assert(street != Street::River);
   return street == Street::Flop ? TURN_BOARD_COUNT : RIVER_CHILDREN_PER_TURN;
-}
-
-BoardIndex RunoutIndex::compressed_card_index(uint64_t board_mask,
-                                              uint8_t card) {
-  assert(card < DECK_SIZE);
-  assert((board_mask & card_mask(card)) == 0);
-  uint64_t lower_cards = card == 0 ? 0 : card_mask(card) - 1;
-  return card -
-         static_cast<BoardIndex>(std::popcount(board_mask & lower_cards));
-}
-
-uint8_t RunoutIndex::card_at_compressed_index(uint64_t board_mask,
-                                              BoardIndex index) {
-  // CUDA should implement this select operation with __fns.
-  return select_available_card(board_mask, index);
 }
 
 BoardIndex RunoutIndex::child_board(Street street, BoardIndex parent_board,

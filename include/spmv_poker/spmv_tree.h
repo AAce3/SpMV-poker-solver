@@ -8,19 +8,20 @@
 #include <cmath>
 #include <limits>
 #include <optional>
-#include <stdint.h>
 #include <span>
+#include <stdint.h>
 #include <utility>
 #include <vector>
 
 namespace spmv_poker {
 
 constexpr size_t NO_CFR_STATE = SIZE_MAX;
+constexpr size_t INVALID_INDEX = SIZE_MAX;
 constexpr size_t FLOP_CARD_COUNT = 3;
 constexpr size_t TURN_BOARD_COUNT = DECK_SIZE - FLOP_CARD_COUNT;
 constexpr size_t RIVER_CHILDREN_PER_TURN = TURN_BOARD_COUNT - 1;
-constexpr size_t RIVER_BOARD_COUNT =
-    TURN_BOARD_COUNT * RIVER_CHILDREN_PER_TURN;
+constexpr size_t RIVER_BOARD_COUNT = TURN_BOARD_COUNT * RIVER_CHILDREN_PER_TURN;
+constexpr size_t HAND_BLOCK_SIZE = 32;
 
 enum class Street : uint8_t {
   Flop,
@@ -38,15 +39,17 @@ struct StreetNode {
   StreetNodeType type;
   IndexRange child_range{0, 0};
   Player player = Player::Hero;
-  // Start of this node's [hand][action] entries within each board's CFR block.
+  // Start of this node's [action][padded hand] CFR block within one board
   size_t cfr_offset_within_board = NO_CFR_STATE;
-  float fold_payoff = std::numeric_limits<float>::quiet_NaN();
+  size_t padded_hand_count = 0;
+  // Identifies this node's implicit fold in the shared topology float array
+  size_t fold_index = INVALID_INDEX;
+  // Identifies this node's reach in reach array
+  size_t reach_index = INVALID_INDEX;
   float win_payoff = 0.0F;
   float loss_payoff = 0.0F;
 
-  [[nodiscard]] bool has_fold() const {
-    return !std::isnan(fold_payoff);
-  }
+  [[nodiscard]] bool has_fold() const { return fold_index != INVALID_INDEX; }
 
   [[nodiscard]] size_t action_count() const {
     return child_range.count + static_cast<size_t>(has_fold());
@@ -64,28 +67,73 @@ struct StreetNode {
   [[nodiscard]] bool has_state() const {
     return cfr_offset_within_board != NO_CFR_STATE;
   }
+
+  [[nodiscard]] size_t state_entry_count() const {
+    assert(type == StreetNodeType::Player);
+    return action_count() * padded_hand_count;
+  }
+
+  [[nodiscard]] size_t action_entry(size_t action, size_t hand = 0) const {
+    assert(type == StreetNodeType::Player);
+    assert(action < action_count());
+    assert(hand < padded_hand_count);
+    return action * padded_hand_count + hand;
+  }
+
+  [[nodiscard]] size_t state_entry(size_t hand, size_t action) const {
+    return cfr_offset_within_board + action_entry(action, hand);
+  }
+
+  [[nodiscard]] std::span<float>
+  state_span(std::span<float> board_state) const {
+    assert(has_state());
+    return board_state.subspan(cfr_offset_within_board, state_entry_count());
+  }
+
+  [[nodiscard]] std::span<const float>
+  state_span(std::span<const float> board_state) const {
+    assert(has_state());
+    return board_state.subspan(cfr_offset_within_board, state_entry_count());
+  }
 };
 
+/*
+ * Describes the betting decisions that can occur on one street, independently
+ * of the concrete public board and private hands being evaluated
+ *
+ * Every public board on the street shares this topology because its available
+ * checks, bets, calls, folds, and transitions have the same structure. Regrets
+ * and cumulative strategy are not stored here
+ */
 struct StreetTopology {
   Street street;
   std::array<size_t, 2> player_hand_counts;
   NodeIndex root = 0;
   std::vector<StreetNode> nodes;
   std::vector<NodeIndex> children;
+  std::vector<size_t> child_endpoints;
+  std::vector<NodeIndex> endpoint_nodes;
+  std::vector<float> fold_payoffs;
+  std::array<size_t, 2> player_reach_counts{0, 0};
   size_t state_entries_per_board = 0;
+  size_t showdown_count = 0;
+  size_t boundary_count = 0;
+  size_t endpoint_count = 0;
 
   StreetTopology(Street street, size_t hand_count)
       : street(street), player_hand_counts{hand_count, hand_count} {}
+
   StreetTopology(Street street, size_t hero_hand_count,
                  size_t villain_hand_count)
       : street(street),
         player_hand_counts{hero_hand_count, villain_hand_count} {}
 
+  // Construction order is [showdowns][boundaries][child-before-parent players].
   NodeIndex add_showdown_node(float win_payoff, float loss_payoff);
   NodeIndex add_boundary_node();
-  NodeIndex add_player_node(
-      Player player, std::span<const NodeIndex> child_nodes,
-      std::optional<float> fold_payoff = std::nullopt);
+  NodeIndex add_player_node(Player player,
+                            std::span<const NodeIndex> child_nodes,
+                            std::optional<float> fold_payoff = std::nullopt);
 
   [[nodiscard]] std::span<const NodeIndex>
   child_nodes(const StreetNode &node) const {
@@ -100,20 +148,66 @@ struct StreetTopology {
     return child_nodes(node)[action - node.continuing_action_begin()];
   }
 
+  [[nodiscard]] size_t endpoint_for_action(const StreetNode &node,
+                                           size_t action) const {
+    assert(node.type == StreetNodeType::Player);
+    assert(action < node.action_count());
+    assert(!node.is_fold_action(action));
+    size_t child_offset =
+        node.child_range.begin + action - node.continuing_action_begin();
+    assert(!is_player(children[child_offset]));
+    return child_endpoints[child_offset];
+  }
+
+  [[nodiscard]] NodeIndex boundary_begin() const {
+    return static_cast<NodeIndex>(showdown_count);
+  }
+
+  [[nodiscard]] NodeIndex player_begin() const {
+    return static_cast<NodeIndex>(showdown_count + boundary_count);
+  }
+
+  [[nodiscard]] bool is_showdown(NodeIndex node) const {
+    return node < boundary_begin();
+  }
+
+  [[nodiscard]] bool is_boundary(NodeIndex node) const {
+    return node >= boundary_begin() && node < player_begin();
+  }
+
+  [[nodiscard]] bool is_player(NodeIndex node) const {
+    return node >= player_begin() && node < nodes.size();
+  }
+
+  [[nodiscard]] std::span<const StreetNode> showdowns() const {
+    return std::span(nodes).first(showdown_count);
+  }
+
+  [[nodiscard]] std::span<const StreetNode> boundaries() const {
+    return std::span(nodes).subspan(boundary_begin(), boundary_count);
+  }
+
+  [[nodiscard]] std::span<const StreetNode> players() const {
+    return std::span(nodes).subspan(player_begin());
+  }
+
+  [[nodiscard]] float fold_payoff(const StreetNode &node) const {
+    assert(node.has_fold());
+    return fold_payoffs[node.fold_index];
+  }
+
   [[nodiscard]] size_t hand_count_for(Player player) const {
     return player_hand_counts[static_cast<size_t>(player)];
   }
 
-  [[nodiscard]] size_t state_entry(const StreetNode &node, size_t hand,
-                                   size_t action) const {
-    assert(node.type == StreetNodeType::Player);
-    assert(hand < hand_count_for(node.player));
-    assert(action < node.action_count());
-    return node.cfr_offset_within_board + hand * node.action_count() + action;
+  [[nodiscard]] size_t padded_hand_count_for(Player player) const {
+    size_t hand_count = hand_count_for(player);
+    return (hand_count + HAND_BLOCK_SIZE - 1) / HAND_BLOCK_SIZE *
+           HAND_BLOCK_SIZE;
   }
 };
 
-// Direct board indexing for a solve rooted at one fixed flop.
+// board indexing for a solve rooted at one fixed flop
 struct RunoutIndex {
 
   explicit RunoutIndex(uint64_t flop_mask) : flop_mask(flop_mask) {
@@ -130,40 +224,82 @@ struct RunoutIndex {
 
 private:
   uint64_t flop_mask;
-  [[nodiscard]] static BoardIndex compressed_card_index(uint64_t board_mask,
-                                                        uint8_t card);
-  [[nodiscard]] static uint8_t card_at_compressed_index(uint64_t board_mask,
-                                                        BoardIndex index);
 };
 
-struct StreetGame {
+// Complete solver data for one street
+// Stores shared betting topology (independent of public board)
+// as well as CFR state for every public board
+struct StreetTree {
   const StreetTopology topology;
   const RunoutIndex board_index;
-  SolverState state;
+  std::vector<float> regrets;
+  std::vector<float> cumulative_strategy;
 
-  StreetGame(StreetTopology topology, uint64_t flop_mask);
+  StreetTree(StreetTopology topology, uint64_t flop_mask);
 
-  [[nodiscard]] size_t state_entry(BoardIndex board,
-                                   NodeIndex node_index, size_t hand,
-                                   size_t action) const {
+  [[nodiscard]] size_t state_entry(BoardIndex board, NodeIndex node_index,
+                                   size_t hand, size_t action) const {
     assert(board < board_index.board_count(topology.street));
     assert(node_index < topology.nodes.size());
+    const StreetNode &node = topology.nodes[node_index];
+    assert(hand < topology.hand_count_for(node.player));
     return static_cast<size_t>(board) * topology.state_entries_per_board +
-           topology.state_entry(topology.nodes[node_index], hand, action);
+           node.state_entry(hand, action);
   }
 
   [[nodiscard]] std::span<float> board_regrets(BoardIndex board) {
     assert(board < board_index.board_count(topology.street));
-    return std::span(state.regrets).subspan(
-        static_cast<size_t>(board) * topology.state_entries_per_board,
-        topology.state_entries_per_board);
+    return std::span(regrets).subspan(static_cast<size_t>(board) *
+                                          topology.state_entries_per_board,
+                                      topology.state_entries_per_board);
   }
 
-  [[nodiscard]] std::span<float> board_strategy_sum(BoardIndex board) {
+  [[nodiscard]] std::span<const float> board_regrets(BoardIndex board) const {
     assert(board < board_index.board_count(topology.street));
-    return std::span(state.strategy_sum)
+    return std::span(regrets).subspan(static_cast<size_t>(board) *
+                                          topology.state_entries_per_board,
+                                      topology.state_entries_per_board);
+  }
+
+  [[nodiscard]] std::span<float> board_cumulative_strategy(BoardIndex board) {
+    assert(board < board_index.board_count(topology.street));
+    return std::span(cumulative_strategy)
         .subspan(static_cast<size_t>(board) * topology.state_entries_per_board,
                  topology.state_entries_per_board);
+  }
+
+  [[nodiscard]] std::span<const float>
+  board_cumulative_strategy(BoardIndex board) const {
+    assert(board < board_index.board_count(topology.street));
+    return std::span(cumulative_strategy)
+        .subspan(static_cast<size_t>(board) * topology.state_entries_per_board,
+                 topology.state_entries_per_board);
+  }
+
+  [[nodiscard]] std::span<float> node_regrets(BoardIndex board,
+                                              NodeIndex node_index) {
+    assert(node_index < topology.nodes.size());
+    return topology.nodes[node_index].state_span(board_regrets(board));
+  }
+
+  [[nodiscard]] std::span<const float>
+  node_regrets(BoardIndex board, NodeIndex node_index) const {
+    assert(node_index < topology.nodes.size());
+    return topology.nodes[node_index].state_span(board_regrets(board));
+  }
+
+  [[nodiscard]] std::span<float>
+  node_cumulative_strategy(BoardIndex board, NodeIndex node_index) {
+    assert(node_index < topology.nodes.size());
+    return topology.nodes[node_index].state_span(
+        board_cumulative_strategy(board));
+  }
+
+  [[nodiscard]] std::span<const float>
+  node_cumulative_strategy(BoardIndex board, NodeIndex node_index) const {
+    assert(node_index < topology.nodes.size());
+    return topology.nodes[node_index].state_span(
+        board_cumulative_strategy(board));
   }
 };
 
