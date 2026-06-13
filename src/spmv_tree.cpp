@@ -136,15 +136,6 @@ StreetTopology::add_player_node(Player player,
   return index;
 }
 
-StreetTree::StreetTree(StreetTopology topology, uint64_t flop_mask)
-    : topology(std::move(topology)), board_index(flop_mask),
-      regrets(board_index.board_count(this->topology.street) *
-                  this->topology.state_entries_per_board,
-              0.0F),
-      cumulative_strategy(board_index.board_count(this->topology.street) *
-                              this->topology.state_entries_per_board,
-                          0.0F) {}
-
 size_t RunoutIndex::board_count(Street street) const {
   switch (street) {
   case Street::Flop:

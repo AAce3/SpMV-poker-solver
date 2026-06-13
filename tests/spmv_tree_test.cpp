@@ -1,4 +1,4 @@
-#include "spmv_poker/spmv_tree.h"
+#include "spmv_poker/tree_compiler.h"
 
 #include <algorithm>
 #include <array>
@@ -32,8 +32,7 @@ StreetTopology make_topology() {
 }
 
 void test_shared_topology_and_child_order() {
-  StreetTree game(make_topology(), make_mask(std::array<uint8_t, 3>{2, 5, 8}));
-  const StreetTopology &topology = game.topology;
+  StreetTopology topology = make_topology();
 
   check(topology.nodes.size() == 4, "implicit folds allocate no nodes");
   check(topology.fold_payoffs.size() == 1,
@@ -99,17 +98,17 @@ void test_board_node_action_padded_hand_layout() {
   BoardIndex first = 0;
   BoardIndex second = 1;
 
-  check(game.topology.nodes.size() == 4,
-        "derived boards do not duplicate grouped topology");
-  check(game.topology.state_entries_per_board == 160,
+  check(game.compiled.nodes.size() == 2,
+        "street tree stores only compiled player nodes");
+  check(game.compiled.state_entries_per_board == 160,
         "board state pads each player node action to 32 hands");
   check(game.regrets.size() == RIVER_BOARD_COUNT * 160,
         "every derived river board receives separate regrets");
   check(game.cumulative_strategy.size() == RIVER_BOARD_COUNT * 160,
         "every derived river board receives separate strategy sums");
 
-  NodeIndex villain = game.topology.player_begin();
-  NodeIndex hero = game.topology.root;
+  uint32_t villain = 0;
+  uint32_t hero = game.compiled.root_value_slot;
   check(game.state_entry(first, villain, 0, 0) == 0,
         "first board starts with first node");
   check(game.state_entry(first, villain, 1, 0) == 1,
@@ -132,6 +131,14 @@ void test_board_node_action_padded_hand_layout() {
         "board regret view covers one board");
   check(game.board_cumulative_strategy(second).size() == 160,
         "board strategy view covers one board");
+  check(game.compiled.fold_payoffs == std::vector<float>{-1.0F},
+        "compiled street retains fold terminal metadata");
+  check(game.compiled.showdowns.size() == 2,
+        "compiled street retains path-specific showdown metadata");
+  check(game.compiled.showdown_value_count == 2,
+        "compiled street counts path-specific showdowns");
+  check(game.compiled.boundary_value_count == 1,
+        "compiled street counts path-specific boundaries");
 }
 
 void test_fixed_flop_board_indexing() {

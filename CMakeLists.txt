@@ -40,6 +40,7 @@ add_library(poker_core
     src/range.cpp
     src/spmv_tree.cpp
     src/terminal.cpp
+    src/tree_compiler.cpp
 )
 target_include_directories(poker_core PUBLIC include)
 target_link_libraries(poker_core PRIVATE pheval7)
@@ -68,3 +69,7 @@ add_test(NAME evaluator_tests COMMAND evaluator_tests)
 add_executable(spmv_tree_tests tests/spmv_tree_test.cpp)
 target_link_libraries(spmv_tree_tests PRIVATE poker_core)
 add_test(NAME spmv_tree_tests COMMAND spmv_tree_tests)
+
+add_executable(tree_compiler_tests tests/tree_compiler_test.cpp)
+target_link_libraries(tree_compiler_tests PRIVATE poker_core)
+add_test(NAME tree_compiler_tests COMMAND tree_compiler_tests)
