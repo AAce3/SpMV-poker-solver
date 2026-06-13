@@ -38,6 +38,7 @@ add_library(poker_core
     src/game_config.cpp
     src/game_tree.cpp
     src/range.cpp
+    src/spmv_evaluator.cpp
     src/spmv_tree.cpp
     src/terminal.cpp
     src/tree_compiler.cpp
@@ -69,6 +70,10 @@ add_test(NAME evaluator_tests COMMAND evaluator_tests)
 add_executable(spmv_tree_tests tests/spmv_tree_test.cpp)
 target_link_libraries(spmv_tree_tests PRIVATE poker_core)
 add_test(NAME spmv_tree_tests COMMAND spmv_tree_tests)
+
+add_executable(spmv_evaluator_tests tests/spmv_evaluator_test.cpp)
+target_link_libraries(spmv_evaluator_tests PRIVATE poker_core)
+add_test(NAME spmv_evaluator_tests COMMAND spmv_evaluator_tests)
 
 add_executable(tree_compiler_tests tests/tree_compiler_test.cpp)
 target_link_libraries(tree_compiler_tests PRIVATE poker_core)
