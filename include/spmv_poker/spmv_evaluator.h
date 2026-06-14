@@ -21,6 +21,19 @@ struct RiverUpdateBuffers {
   StreetValueBuffer values;
 };
 
+struct RiverBoardUpdate {
+  BoardIndex board;
+  std::array<std::span<const float>, 2> root_reaches;
+  std::span<float> root_values;
+  float chance_reach = 1.0F;
+};
+
+struct RiverBoardBatchBuffers {
+  // Dense [workspace slot][board][hand] layouts.
+  std::array<std::vector<float>, 2> reaches;
+  std::vector<float> values;
+};
+
 struct RiverTerminalOperator {
   virtual ~RiverTerminalOperator() = default;
 
@@ -37,6 +50,19 @@ struct RiverTerminalOperator {
                                   std::span<const CompiledShowdown> showdowns,
                                   std::span<float> values,
                                   size_t evaluated_hand_stride) const = 0;
+
+  // Batch layouts are [terminal endpoint][board][hand].
+  virtual void evaluate_fold_board_batch(
+      std::span<const BoardIndex> boards, Player evaluated_player,
+      std::span<const float> opponent_reaches, size_t opponent_hand_stride,
+      std::span<const float> payoffs, std::span<float> values,
+      size_t evaluated_hand_stride) const;
+
+  virtual void evaluate_showdown_board_batch(
+      std::span<const BoardIndex> boards, Player evaluated_player,
+      std::span<const float> opponent_reaches, size_t opponent_hand_stride,
+      std::span<const CompiledShowdown> showdowns, std::span<float> values,
+      size_t evaluated_hand_stride) const;
 };
 
 void propagate_reaches(
@@ -75,5 +101,12 @@ void update_river(StreetTree &river, BoardIndex board,
                   Player player, const RiverTerminalOperator &terminals,
                   RiverUpdateBuffers &buffers, std::span<float> root_values,
                   float chance_reach = 1.0F, float iteration_weight = 1.0F);
+
+// Processes distinct complete river betting trees as one dense board batch
+void update_river_boards(StreetTree &river,
+                         std::span<const RiverBoardUpdate> jobs, Player player,
+                         const RiverTerminalOperator &terminals,
+                         RiverBoardBatchBuffers &buffers,
+                         float iteration_weight = 1.0F);
 
 } // namespace spmv_poker

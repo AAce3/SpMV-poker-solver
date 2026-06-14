@@ -1,3 +1,4 @@
+#include "spmv_poker/spmv_terminal.h"
 #include "spmv_poker/spmv_evaluator.h"
 
 #include <algorithm>
@@ -57,6 +58,31 @@ TestGame make_game() {
           first_showdown,  second_showdown};
 }
 
+TestGame make_game(const TerminalTables &tables) {
+  StreetTopology topology(
+      Street::River, tables.hands(Player::Hero).size(),
+      tables.hands(Player::Villain).size());
+  NodeIndex first_showdown_node = topology.add_showdown_node(1.0F, -1.0F);
+  NodeIndex second_showdown_node = topology.add_showdown_node(2.0F, -2.0F);
+  std::array villain_children{first_showdown_node};
+  NodeIndex villain =
+      topology.add_player_node(Player::Villain, villain_children, -1.0F);
+  std::array hero_children{villain, second_showdown_node};
+  NodeIndex hero = topology.add_player_node(Player::Hero, hero_children);
+  topology.root = hero;
+  uint32_t villain_slot = villain - topology.player_begin();
+  uint32_t hero_slot = hero - topology.player_begin();
+  size_t fold = topology.nodes[villain].fold_index;
+  size_t first_showdown =
+      topology.endpoint_for_action(topology.nodes[villain], 1);
+  size_t second_showdown =
+      topology.endpoint_for_action(topology.nodes[hero], 1);
+  StreetTree game(std::move(topology),
+                  make_mask(std::array<uint8_t, 3>{2, 5, 8}));
+  return {std::move(game), villain_slot,   hero_slot, fold,
+          first_showdown,  second_showdown};
+}
+
 void set_regrets(TestGame &test) {
   StreetTree &game = test.game;
   game.regrets[game.state_entry(0, test.hero, 0, 0)] = 3.0F;
@@ -91,7 +117,7 @@ struct TestTerminalOperator : RiverTerminalOperator {
     for (size_t showdown = 0; showdown < showdowns.size(); ++showdown) {
       std::ranges::fill(values.subspan(showdown * evaluated_hand_stride,
                                        evaluated_hand_stride),
-                        10.0F * static_cast<float>(showdown + 1));
+                        10.0F * showdowns[showdown].win_payoff);
     }
   }
 };
@@ -309,6 +335,153 @@ void test_river_update_orchestration() {
              "river update propagates terminal values to the root");
 }
 
+void test_dense_river_board_batch_matches_individual_updates() {
+  TestGame individual = make_game();
+  TestGame batched = make_game();
+  size_t width = individual.game.compiled.padded_hand_counts[0];
+  constexpr size_t board_count = 5;
+  std::array<std::array<std::vector<float>, 2>, board_count> roots;
+  std::array<std::vector<float>, board_count> individual_values;
+  std::array<std::vector<float>, board_count> batched_values;
+  std::vector<RiverBoardUpdate> jobs;
+  jobs.reserve(board_count);
+  for (size_t board = 0; board < board_count; ++board) {
+    roots[board][0].resize(width);
+    roots[board][1].resize(width);
+    roots[board][0][0] = static_cast<float>(board + 1);
+    roots[board][1][0] = static_cast<float>(2 * board + 1);
+    individual_values[board].resize(width);
+    batched_values[board].resize(width);
+    jobs.push_back({
+        .board = static_cast<BoardIndex>(board),
+        .root_reaches = {roots[board][0], roots[board][1]},
+        .root_values = batched_values[board],
+        .chance_reach = 0.25F * static_cast<float>(board + 1),
+    });
+  }
+  TestTerminalOperator terminals;
+  RiverUpdateBuffers individual_buffers;
+  for (size_t board = 0; board < board_count; ++board) {
+    std::array<std::span<const float>, 2> root_spans{roots[board][0],
+                                                     roots[board][1]};
+    update_river(individual.game, static_cast<BoardIndex>(board), root_spans,
+                 Player::Hero, terminals, individual_buffers,
+                 individual_values[board],
+                 0.25F * static_cast<float>(board + 1), 2.0F);
+  }
+
+  RiverBoardBatchBuffers batch_buffers;
+  update_river_boards(batched.game, jobs, Player::Hero, terminals,
+                      batch_buffers, 2.0F);
+
+  for (size_t board = 0; board < board_count; ++board) {
+    for (size_t hand = 0; hand < width; ++hand) {
+      check_near(batched_values[board][hand], individual_values[board][hand],
+                 "board batch root value matches individual update");
+    }
+  }
+  for (size_t entry = 0; entry < individual.game.regrets.size(); ++entry) {
+    check_near(batched.game.regrets[entry], individual.game.regrets[entry],
+               "board batch regret update matches individual update");
+    check_near(batched.game.cumulative_strategy[entry],
+               individual.game.cumulative_strategy[entry],
+               "board batch strategy update matches individual update");
+  }
+  size_t expected_reach_floats_per_board =
+      static_cast<size_t>(
+          batched.game.compiled.forward_plans[0].workspace_slot_count) *
+          width +
+      static_cast<size_t>(
+          batched.game.compiled.forward_plans[1].workspace_slot_count) *
+          width;
+  check(batch_buffers.reaches[0].size() + batch_buffers.reaches[1].size() ==
+            board_count * expected_reach_floats_per_board,
+        "board batch reach workspace has a dense board dimension");
+  check(batch_buffers.values.size() ==
+            board_count *
+                batched.game.compiled.value_workspace_slot_count * width,
+        "board batch value workspace has a dense board dimension");
+}
+
+void test_rank_summary_terminal_board_batch_integration() {
+  std::array<uint8_t, 3> flop{2, 5, 8};
+  TerminalTables tables(flop);
+  TestGame individual = make_game(tables);
+  TestGame batched = make_game(tables);
+  TiledRankSummaryRiverTerminalOperator terminals(tables, make_mask(flop));
+
+  size_t width = individual.game.compiled.padded_hand_counts[0];
+  constexpr size_t board_count = 3;
+  std::array<BoardIndex, board_count> boards{0, 317, 761};
+  std::array<std::array<std::vector<float>, 2>, board_count> roots;
+  std::array<std::vector<float>, board_count> individual_values;
+  std::array<std::vector<float>, board_count> batched_values;
+  std::vector<RiverBoardUpdate> jobs;
+  jobs.reserve(board_count);
+  for (size_t board = 0; board < board_count; ++board) {
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t player_index = static_cast<size_t>(player);
+      roots[board][player_index].resize(width);
+      for (size_t hand = 0; hand < width; ++hand) {
+        roots[board][player_index][hand] =
+            static_cast<float>(((board + 2) * (player_index + 3) *
+                                (hand + 5)) % 29) /
+            29.0F;
+      }
+    }
+    individual_values[board].resize(width);
+    batched_values[board].resize(width);
+    jobs.push_back({
+        .board = boards[board],
+        .root_reaches = {roots[board][0], roots[board][1]},
+        .root_values = batched_values[board],
+        .chance_reach = 0.25F * static_cast<float>(board + 1),
+    });
+  }
+
+  RiverUpdateBuffers individual_buffers;
+  for (size_t board = 0; board < board_count; ++board) {
+    std::array<std::span<const float>, 2> root_spans{roots[board][0],
+                                                     roots[board][1]};
+    update_river(individual.game, boards[board], root_spans, Player::Hero,
+                 terminals, individual_buffers, individual_values[board],
+                 0.25F * static_cast<float>(board + 1), 1.5F);
+  }
+
+  RiverBoardBatchBuffers batch_buffers;
+  update_river_boards(batched.game, jobs, Player::Hero, terminals,
+                      batch_buffers, 1.5F);
+
+  for (size_t board = 0; board < board_count; ++board) {
+    for (size_t hand = 0; hand < width; ++hand) {
+      check_near(batched_values[board][hand], individual_values[board][hand],
+                 "rank-summary batched root value matches individual update");
+    }
+  }
+  for (size_t entry = 0; entry < individual.game.regrets.size(); ++entry) {
+    check_near(batched.game.regrets[entry], individual.game.regrets[entry],
+               "rank-summary batched regret update matches individual update");
+    check_near(batched.game.cumulative_strategy[entry],
+               individual.game.cumulative_strategy[entry],
+               "rank-summary batched strategy update matches individual update");
+  }
+
+  size_t expected_reach_floats_per_board =
+      static_cast<size_t>(
+          batched.game.compiled.forward_plans[0].workspace_slot_count) *
+          width +
+      static_cast<size_t>(
+          batched.game.compiled.forward_plans[1].workspace_slot_count) *
+          width;
+  check(batch_buffers.reaches[0].size() + batch_buffers.reaches[1].size() ==
+            board_count * expected_reach_floats_per_board,
+        "rank-summary board batch reach workspace has a dense board dimension");
+  check(batch_buffers.values.size() ==
+            board_count *
+                batched.game.compiled.value_workspace_slot_count * width,
+        "rank-summary board batch value workspace has a dense board dimension");
+}
+
 } // namespace
 
 int main() {
@@ -319,6 +492,8 @@ int main() {
     test_player_specific_workspace_widths();
     test_separate_showdown_and_boundary_regions();
     test_river_update_orchestration();
+    test_dense_river_board_batch_matches_individual_updates();
+    test_rank_summary_terminal_board_batch_integration();
   } catch (const std::exception &error) {
     std::cerr << "Test failure: " << error.what() << '\n';
     return EXIT_FAILURE;

@@ -1,4 +1,5 @@
 #include "spmv_poker/spmv_evaluator.h"
+#include "spmv_poker/spmv_terminal.h"
 
 #include <algorithm>
 #include <array>
@@ -22,6 +23,29 @@ ConstHandBlock hand_block_at_slot(std::span<const float> storage, uint32_t slot,
                                   size_t hands_per_slot, size_t hand_begin) {
   return ConstHandBlock(
       storage.data() + static_cast<size_t>(slot) * hands_per_slot + hand_begin,
+      HAND_BLOCK_SIZE);
+}
+
+HandBlock batched_hand_block_at_slot(std::span<float> storage, uint32_t slot,
+                                     size_t board, size_t board_count,
+                                     size_t hands_per_slot,
+                                     size_t hand_begin) {
+  return HandBlock(
+      storage.data() +
+          (static_cast<size_t>(slot) * board_count + board) * hands_per_slot +
+          hand_begin,
+      HAND_BLOCK_SIZE);
+}
+
+ConstHandBlock batched_hand_block_at_slot(std::span<const float> storage,
+                                          uint32_t slot, size_t board,
+                                          size_t board_count,
+                                          size_t hands_per_slot,
+                                          size_t hand_begin) {
+  return ConstHandBlock(
+      storage.data() +
+          (static_cast<size_t>(slot) * board_count + board) * hands_per_slot +
+          hand_begin,
       HAND_BLOCK_SIZE);
 }
 
@@ -347,6 +371,313 @@ void update_river(StreetTree &river, BoardIndex board,
 
   update_player(river, board, player, buffers.reaches.workspaces[player_index],
                 buffers.values, root_values, chance_reach, iteration_weight);
+}
+
+void RiverTerminalOperator::evaluate_fold_board_batch(
+    std::span<const BoardIndex> boards, Player evaluated_player,
+    std::span<const float> opponent_reaches, size_t opponent_hand_stride,
+    std::span<const float> payoffs, std::span<float> values,
+    size_t evaluated_hand_stride) const {
+  size_t board_count = boards.size();
+  assert(opponent_reaches.size() ==
+         payoffs.size() * board_count * opponent_hand_stride);
+  assert(values.size() ==
+         payoffs.size() * board_count * evaluated_hand_stride);
+  std::vector<float> board_reaches(payoffs.size() * opponent_hand_stride);
+  std::vector<float> board_values(payoffs.size() * evaluated_hand_stride);
+  for (size_t board = 0; board < board_count; ++board) {
+    for (size_t terminal = 0; terminal < payoffs.size(); ++terminal) {
+      auto source = opponent_reaches.subspan(
+          (terminal * board_count + board) * opponent_hand_stride,
+          opponent_hand_stride);
+      std::ranges::copy(
+          source, board_reaches.begin() + terminal * opponent_hand_stride);
+    }
+    evaluate_folds(boards[board], evaluated_player, board_reaches,
+                   opponent_hand_stride, payoffs, board_values,
+                   evaluated_hand_stride);
+    for (size_t terminal = 0; terminal < payoffs.size(); ++terminal) {
+      auto source = std::span<const float>(board_values)
+                        .subspan(terminal * evaluated_hand_stride,
+                                 evaluated_hand_stride);
+      std::ranges::copy(
+          source, values.begin() +
+                      (terminal * board_count + board) * evaluated_hand_stride);
+    }
+  }
+}
+
+void RiverTerminalOperator::evaluate_showdown_board_batch(
+    std::span<const BoardIndex> boards, Player evaluated_player,
+    std::span<const float> opponent_reaches, size_t opponent_hand_stride,
+    std::span<const CompiledShowdown> showdowns, std::span<float> values,
+    size_t evaluated_hand_stride) const {
+  size_t board_count = boards.size();
+  assert(opponent_reaches.size() ==
+         showdowns.size() * board_count * opponent_hand_stride);
+  assert(values.size() ==
+         showdowns.size() * board_count * evaluated_hand_stride);
+  std::vector<float> board_reaches(showdowns.size() * opponent_hand_stride);
+  std::vector<float> board_values(showdowns.size() * evaluated_hand_stride);
+  for (size_t board = 0; board < board_count; ++board) {
+    for (size_t terminal = 0; terminal < showdowns.size(); ++terminal) {
+      auto source = opponent_reaches.subspan(
+          (terminal * board_count + board) * opponent_hand_stride,
+          opponent_hand_stride);
+      std::ranges::copy(
+          source, board_reaches.begin() + terminal * opponent_hand_stride);
+    }
+    evaluate_showdowns(boards[board], evaluated_player, board_reaches,
+                       opponent_hand_stride, showdowns, board_values,
+                       evaluated_hand_stride);
+    for (size_t terminal = 0; terminal < showdowns.size(); ++terminal) {
+      auto source = std::span<const float>(board_values)
+                        .subspan(terminal * evaluated_hand_stride,
+                                 evaluated_hand_stride);
+      std::ranges::copy(
+          source, values.begin() +
+                      (terminal * board_count + board) * evaluated_hand_stride);
+    }
+  }
+}
+
+void update_river_boards(StreetTree &river,
+                         std::span<const RiverBoardUpdate> jobs, Player player,
+                         const RiverTerminalOperator &terminals,
+                         RiverBoardBatchBuffers &buffers,
+                         float iteration_weight) {
+  if (jobs.empty()) {
+    buffers.reaches = {};
+    buffers.values.clear();
+    return;
+  }
+
+  const CompiledStreet &compiled = river.compiled;
+  assert(compiled.street == Street::River);
+  assert(compiled.boundary_value_count == 0);
+  size_t board_count = jobs.size();
+  std::vector<BoardIndex> boards;
+  boards.reserve(board_count);
+  for (size_t index = 0; index < jobs.size(); ++index) {
+    const RiverBoardUpdate &job = jobs[index];
+    assert(job.board < river.board_index.board_count(Street::River));
+    for (size_t previous = 0; previous < index; ++previous) {
+      assert(jobs[previous].board != job.board);
+    }
+    boards.push_back(job.board);
+  }
+
+  for (Player propagated_player : {Player::Hero, Player::Villain}) {
+    size_t propagated_index = static_cast<size_t>(propagated_player);
+    size_t width = compiled.padded_hand_counts[propagated_index];
+    const CompiledForwardPlan &plan =
+        compiled.forward_plans[propagated_index];
+    std::vector<float> &workspace = buffers.reaches[propagated_index];
+    workspace.assign(static_cast<size_t>(plan.workspace_slot_count) *
+                         board_count * width,
+                     0.0F);
+
+    for (size_t board = 0; board < board_count; ++board) {
+      assert(jobs[board].root_reaches[propagated_index].size() == width);
+      for (size_t hand_begin = 0; hand_begin < width;
+           hand_begin += HAND_BLOCK_SIZE) {
+        std::ranges::copy(
+            jobs[board].root_reaches[propagated_index].subspan(
+                hand_begin, HAND_BLOCK_SIZE),
+            batched_hand_block_at_slot(std::span<float>(workspace),
+                                       plan.root_input_reach_slot, board,
+                                       board_count, width, hand_begin)
+                .begin());
+      }
+    }
+
+    for (size_t node_offset = plan.nodes.size(); node_offset-- > 0;) {
+      const CompiledForwardNode &node = plan.nodes[node_offset];
+      for (size_t board = 0; board < board_count; ++board) {
+        std::span<const float> board_regrets =
+            river.board_regrets(jobs[board].board);
+        for (size_t hand_begin = 0; hand_begin < width;
+             hand_begin += HAND_BLOCK_SIZE) {
+          ConstHandBlock input = batched_hand_block_at_slot(
+              std::span<const float>(workspace), node.input_reach_slot, board,
+              board_count, width, hand_begin);
+          alignas(64) std::array<float, HAND_BLOCK_SIZE> inverse_positive_sums;
+          if (node.player == propagated_player) {
+            compute_regret_matching_factors(
+                board_regrets, node.cfr_offset_within_board, node.action_begin,
+                node.action_count, hand_begin,
+                std::span<const CompiledForwardAction>(plan.actions),
+                inverse_positive_sums);
+          }
+          float uniform_probability =
+              1.0F / static_cast<float>(node.action_count);
+          for (size_t action = 0; action < node.action_count; ++action) {
+            const CompiledForwardAction &compiled_action =
+                plan.actions[node.action_begin + action];
+            HandBlock destination = batched_hand_block_at_slot(
+                std::span<float>(workspace), compiled_action.destination_slot,
+                board, board_count, width, hand_begin);
+            if (node.player == propagated_player) {
+              const float *regrets =
+                  board_regrets.data() + node.cfr_offset_within_board +
+                  compiled_action.cfr_action_offset + hand_begin;
+              for (size_t lane = 0; lane < HAND_BLOCK_SIZE; ++lane) {
+                float inverse = inverse_positive_sums[lane];
+                float strategy =
+                    inverse > 0.0F
+                        ? std::max(0.0F, regrets[lane]) * inverse
+                        : uniform_probability;
+                destination[lane] += input[lane] * strategy;
+              }
+            } else {
+              for (size_t lane = 0; lane < HAND_BLOCK_SIZE; ++lane) {
+                destination[lane] += input[lane];
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  size_t player_index = static_cast<size_t>(player);
+  size_t opponent_index = static_cast<size_t>(opponent(player));
+  size_t player_width = compiled.padded_hand_counts[player_index];
+  size_t opponent_width = compiled.padded_hand_counts[opponent_index];
+  if (const auto *rank_summary =
+          dynamic_cast<const TiledRankSummaryRiverTerminalOperator *>(
+              &terminals)) {
+    rank_summary->reserve_showdown_summary_scratch(
+        boards, static_cast<size_t>(compiled.showdowns.size()));
+  }
+  buffers.values.assign(static_cast<size_t>(compiled.value_workspace_slot_count) *
+                            board_count * player_width,
+                        0.0F);
+  const CompiledForwardPlan &opponent_plan =
+      compiled.forward_plans[opponent_index];
+  const std::vector<float> &opponent_reaches = buffers.reaches[opponent_index];
+
+  terminals.evaluate_fold_board_batch(
+      boards, player,
+      std::span<const float>(opponent_reaches)
+          .subspan(static_cast<size_t>(opponent_plan.fold_reach_begin) *
+                       board_count * opponent_width,
+                   static_cast<size_t>(opponent_plan.fold_reach_count) *
+                       board_count * opponent_width),
+      opponent_width, compiled.fold_payoffs,
+      std::span<float>(buffers.values)
+          .subspan(static_cast<size_t>(compiled.fold_value_begin) *
+                       board_count * player_width,
+                   static_cast<size_t>(compiled.fold_value_count) *
+                       board_count * player_width),
+      player_width);
+  terminals.evaluate_showdown_board_batch(
+      boards, player,
+      std::span<const float>(opponent_reaches)
+          .subspan(static_cast<size_t>(opponent_plan.showdown_reach_begin) *
+                       board_count * opponent_width,
+                   static_cast<size_t>(opponent_plan.showdown_reach_count) *
+                       board_count * opponent_width),
+      opponent_width, compiled.showdowns,
+      std::span<float>(buffers.values)
+          .subspan(static_cast<size_t>(compiled.showdown_value_begin) *
+                       board_count * player_width,
+                   static_cast<size_t>(compiled.showdown_value_count) *
+                       board_count * player_width),
+      player_width);
+
+  const CompiledForwardPlan &player_plan = compiled.forward_plans[player_index];
+  for (const CompiledBackwardNode &node : compiled.nodes) {
+    for (size_t board = 0; board < board_count; ++board) {
+      std::span<float> board_regrets = river.board_regrets(jobs[board].board);
+      std::span<float> board_strategy =
+          river.board_cumulative_strategy(jobs[board].board);
+      for (size_t hand_begin = 0; hand_begin < player_width;
+           hand_begin += HAND_BLOCK_SIZE) {
+        HandBlock output = batched_hand_block_at_slot(
+            std::span<float>(buffers.values), node.output_value_slot, board,
+            board_count, player_width, hand_begin);
+        std::ranges::fill(output, 0.0F);
+        bool updates_player = node.player == player;
+        alignas(64) std::array<float, HAND_BLOCK_SIZE> inverse_positive_sums;
+        if (updates_player) {
+          compute_regret_matching_factors(
+              std::span<const float>(board_regrets),
+              node.cfr_offset_within_board, node.action_begin,
+              node.action_count, hand_begin,
+              std::span<const CompiledBackwardAction>(
+                  compiled.backward_actions),
+              inverse_positive_sums);
+        }
+        float uniform_probability =
+            1.0F / static_cast<float>(node.action_count);
+        for (size_t action = 0; action < node.action_count; ++action) {
+          const CompiledBackwardAction &compiled_action =
+              compiled.backward_actions[node.action_begin + action];
+          ConstHandBlock source = batched_hand_block_at_slot(
+              std::span<const float>(buffers.values),
+              compiled_action.source_slot, board, board_count, player_width,
+              hand_begin);
+          if (updates_player) {
+            const float *regrets =
+                board_regrets.data() + node.cfr_offset_within_board +
+                compiled_action.cfr_action_offset + hand_begin;
+            float *strategy_sum =
+                board_strategy.data() + node.cfr_offset_within_board +
+                compiled_action.cfr_action_offset + hand_begin;
+            ConstHandBlock player_reach = batched_hand_block_at_slot(
+                std::span<const float>(buffers.reaches[player_index]),
+                player_plan.retained_reach_begin + node.retained_reach_slot,
+                board, board_count, player_width, hand_begin);
+            for (size_t lane = 0; lane < HAND_BLOCK_SIZE; ++lane) {
+              float inverse = inverse_positive_sums[lane];
+              float strategy =
+                  inverse > 0.0F ? std::max(0.0F, regrets[lane]) * inverse
+                                 : uniform_probability;
+              output[lane] += strategy * source[lane];
+              strategy_sum[lane] +=
+                  iteration_weight * player_reach[lane] * strategy;
+            }
+          } else {
+            for (size_t lane = 0; lane < HAND_BLOCK_SIZE; ++lane) {
+              output[lane] += source[lane];
+            }
+          }
+        }
+        if (updates_player) {
+          for (size_t action = 0; action < node.action_count; ++action) {
+            const CompiledBackwardAction &compiled_action =
+                compiled.backward_actions[node.action_begin + action];
+            ConstHandBlock source = batched_hand_block_at_slot(
+                std::span<const float>(buffers.values),
+                compiled_action.source_slot, board, board_count, player_width,
+                hand_begin);
+            float *regrets =
+                board_regrets.data() + node.cfr_offset_within_board +
+                compiled_action.cfr_action_offset + hand_begin;
+            for (size_t lane = 0; lane < HAND_BLOCK_SIZE; ++lane) {
+              regrets[lane] =
+                  std::max(0.0F, regrets[lane] +
+                                     jobs[board].chance_reach *
+                                         (source[lane] - output[lane]));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (size_t board = 0; board < board_count; ++board) {
+    assert(jobs[board].root_values.size() == player_width);
+    for (size_t hand_begin = 0; hand_begin < player_width;
+         hand_begin += HAND_BLOCK_SIZE) {
+      ConstHandBlock root = batched_hand_block_at_slot(
+          std::span<const float>(buffers.values), compiled.root_value_slot,
+          board, board_count, player_width, hand_begin);
+      std::ranges::copy(root,
+                        jobs[board].root_values.begin() + hand_begin);
+    }
+  }
 }
 
 } // namespace spmv_poker
