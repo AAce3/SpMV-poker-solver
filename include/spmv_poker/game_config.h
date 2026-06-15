@@ -1,15 +1,14 @@
 #pragma once
 
-#include "spmv_poker/game_tree.h"
-#include "spmv_poker/terminal.h"
-
+#include <cstdint>
 #include <vector>
 
 namespace spmv_poker {
 
 enum class StartingStreet : uint8_t {
-  River,
+  Flop,
   Turn,
+  River,
 };
 
 /**
@@ -24,8 +23,5 @@ struct GameConfig {
   float starting_pot = 2.0F;
   std::vector<float> bet_sizes{0.5F};
 };
-
-[[nodiscard]] GameTree build_game_tree(const TerminalTables &terminals,
-                                       const GameConfig &config);
 
 } // namespace spmv_poker

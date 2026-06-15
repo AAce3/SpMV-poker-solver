@@ -54,7 +54,7 @@ void test_tiled_rank_scan_matches_terminal_tables() {
   Range hero = selected_range(full.hands(Player::Hero), 2, 0);
   Range villain = selected_range(full.hands(Player::Villain), 3, 1);
   TerminalTables tables(flop, hero, villain);
-  TiledRankSummaryRiverTerminalOperator terminals(tables, make_mask(flop));
+  RankSummaryTerminalOperator terminals(tables, make_mask(flop));
   RunoutIndex boards(make_mask(flop));
 
   constexpr size_t terminal_count = TERMINAL_TILE_SIZE + 3;
@@ -117,7 +117,7 @@ void test_tiled_rank_scan_matches_terminal_tables() {
 void test_both_evaluated_players() {
   std::array<uint8_t, 3> flop{0, 5, 10};
   TerminalTables tables(flop);
-  TiledRankSummaryRiverTerminalOperator terminals(tables, make_mask(flop));
+  RankSummaryTerminalOperator terminals(tables, make_mask(flop));
   size_t stride = tables.hands(Player::Hero).size();
   std::vector<float> reaches(stride, 1.0F);
   std::array showdowns{CompiledShowdown{.win_payoff = 1.0F,
@@ -142,7 +142,7 @@ void test_board_batch_layout_matches_individual_evaluation() {
   Range hero = selected_range(full.hands(Player::Hero), 2, 0);
   Range villain = selected_range(full.hands(Player::Villain), 3, 1);
   TerminalTables tables(flop, hero, villain);
-  TiledRankSummaryRiverTerminalOperator terminals(tables, make_mask(flop));
+  RankSummaryTerminalOperator terminals(tables, make_mask(flop));
 
   std::array<BoardIndex, 3> boards{0, 317, 2351};
   constexpr size_t terminal_count = 3;
@@ -214,7 +214,7 @@ void test_native_board_batch_matches_individual_evaluation() {
   Range hero = selected_range(full.hands(Player::Hero), 2, 0);
   Range villain = selected_range(full.hands(Player::Villain), 3, 1);
   TerminalTables tables(flop, hero, villain);
-  TiledRankSummaryRiverTerminalOperator terminals(tables, make_mask(flop));
+  RankSummaryTerminalOperator terminals(tables, make_mask(flop));
 
   auto check_player = [&](Player evaluated_player,
                           std::span<const BoardIndex> boards,

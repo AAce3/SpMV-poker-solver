@@ -214,6 +214,13 @@ struct RunoutIndex {
     assert(std::popcount(flop_mask) == FLOP_CARD_COUNT);
   }
 
+  RunoutIndex(uint64_t public_mask, size_t public_card_count)
+      : flop_mask(public_mask), public_card_count(public_card_count) {
+    assert(public_card_count >= FLOP_CARD_COUNT);
+    assert(public_card_count <= 5);
+    assert(std::popcount(public_mask) == public_card_count);
+  }
+
   [[nodiscard]] size_t board_count(Street street) const;
   [[nodiscard]] size_t child_count(Street street) const;
   [[nodiscard]] BoardIndex child_board(Street street, BoardIndex parent_board,
@@ -221,9 +228,12 @@ struct RunoutIndex {
   [[nodiscard]] uint64_t board_mask(Street street, BoardIndex board) const;
   [[nodiscard]] uint8_t turn_card(BoardIndex turn_board) const;
   [[nodiscard]] uint8_t river_card(BoardIndex river_board) const;
+  [[nodiscard]] uint64_t public_mask() const { return flop_mask; }
+  [[nodiscard]] size_t root_public_card_count() const { return public_card_count; }
 
 private:
   uint64_t flop_mask;
+  size_t public_card_count = FLOP_CARD_COUNT;
 };
 
 } // namespace spmv_poker

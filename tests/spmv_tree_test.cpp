@@ -202,6 +202,27 @@ void test_fixed_flop_board_indexing() {
         "direct indexing covers every river exactly");
 }
 
+void test_fixed_turn_board_indexing() {
+  RunoutIndex boards(make_mask(std::array<uint8_t, 4>{2, 5, 8, 13}), 4);
+
+  check(boards.board_count(Street::Turn) == 1,
+        "fixed turn has one current board");
+  check(boards.child_count(Street::Turn) == 48,
+        "fixed turn has one child per remaining river card");
+  check(boards.board_mask(Street::Turn, 0) ==
+            make_mask(std::array<uint8_t, 4>{2, 5, 8, 13}),
+        "turn-root mask is the fixed public board");
+
+  BoardIndex first_river = boards.child_board(Street::Turn, 0, 0);
+  BoardIndex later_river = boards.child_board(Street::Turn, 0, 7);
+  check(first_river == 0, "turn-root child indexing starts at zero");
+  check(later_river == 5,
+        "turn-root child indexing removes lower public cards");
+  check(boards.board_mask(Street::River, first_river) ==
+            make_mask(std::array<uint8_t, 5>{2, 5, 8, 13, 0}),
+        "turn-root river mask is derivable from the child index");
+}
+
 } // namespace
 
 int main() {
@@ -209,6 +230,7 @@ int main() {
     test_shared_topology_and_child_order();
     test_board_node_action_padded_hand_layout();
     test_fixed_flop_board_indexing();
+    test_fixed_turn_board_indexing();
   } catch (const std::exception &error) {
     std::cerr << "Test failure: " << error.what() << '\n';
     return EXIT_FAILURE;

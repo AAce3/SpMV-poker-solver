@@ -141,8 +141,23 @@ size_t RunoutIndex::board_count(Street street) const {
   case Street::Flop:
     return 1;
   case Street::Turn:
-    return TURN_BOARD_COUNT;
+    if (public_card_count == FLOP_CARD_COUNT) {
+      return TURN_BOARD_COUNT;
+    }
+    // A turn-root solve sees one current turn board and expands only to river
+    // children beneath it.
+    assert(public_card_count == FLOP_CARD_COUNT + 1 || public_card_count == 5);
+    return 1;
   case Street::River:
+    if (public_card_count == FLOP_CARD_COUNT) {
+      return RIVER_BOARD_COUNT;
+    }
+    if (public_card_count == FLOP_CARD_COUNT + 1) {
+      return DECK_SIZE - public_card_count;
+    }
+    if (public_card_count == 5) {
+      return 1;
+    }
     return RIVER_BOARD_COUNT;
   }
   assert(false);
@@ -151,12 +166,26 @@ size_t RunoutIndex::board_count(Street street) const {
 
 size_t RunoutIndex::child_count(Street street) const {
   assert(street != Street::River);
-  return street == Street::Flop ? TURN_BOARD_COUNT : RIVER_CHILDREN_PER_TURN;
+  if (street == Street::Flop) {
+    assert(public_card_count == FLOP_CARD_COUNT);
+    return TURN_BOARD_COUNT;
+  }
+  if (public_card_count == FLOP_CARD_COUNT) {
+    return RIVER_CHILDREN_PER_TURN;
+  }
+  assert(public_card_count == FLOP_CARD_COUNT + 1 || public_card_count == 5);
+  return DECK_SIZE - public_card_count;
 }
 
 BoardIndex RunoutIndex::child_board(Street street, BoardIndex parent_board,
                                     uint8_t dealt_card) const {
   assert(street != Street::River);
+  if (street == Street::Turn && public_card_count != FLOP_CARD_COUNT) {
+    assert(parent_board == 0);
+    assert(public_card_count == FLOP_CARD_COUNT + 1 || public_card_count == 5);
+    return compressed_card_index(flop_mask, dealt_card);
+  }
+  assert(public_card_count == FLOP_CARD_COUNT);
   assert(parent_board < board_count(street));
   uint64_t parent_mask = board_mask(street, parent_board);
   BoardIndex child = compressed_card_index(parent_mask, dealt_card);
@@ -167,11 +196,13 @@ BoardIndex RunoutIndex::child_board(Street street, BoardIndex parent_board,
 }
 
 uint8_t RunoutIndex::turn_card(BoardIndex turn_board) const {
+  assert(public_card_count == FLOP_CARD_COUNT);
   assert(turn_board < TURN_BOARD_COUNT);
   return card_at_compressed_index(flop_mask, turn_board);
 }
 
 uint8_t RunoutIndex::river_card(BoardIndex river_board) const {
+  assert(public_card_count == FLOP_CARD_COUNT);
   assert(river_board < RIVER_BOARD_COUNT);
   BoardIndex turn_board = river_board / RIVER_CHILDREN_PER_TURN;
   BoardIndex river_offset = river_board % RIVER_CHILDREN_PER_TURN;
@@ -183,6 +214,20 @@ uint64_t RunoutIndex::board_mask(Street street, BoardIndex board) const {
   assert(board < board_count(street));
   if (street == Street::Flop) {
     return flop_mask;
+  }
+
+  if (public_card_count != FLOP_CARD_COUNT) {
+    if (public_card_count == FLOP_CARD_COUNT + 1) {
+      assert(street == Street::Turn || street == Street::River);
+      if (street == Street::Turn) {
+        return flop_mask;
+      }
+      return flop_mask | card_mask(card_at_compressed_index(flop_mask, board));
+    }
+    if (public_card_count == 5) {
+      assert(street == Street::Turn || street == Street::River);
+      return flop_mask;
+    }
   }
 
   BoardIndex turn_board =

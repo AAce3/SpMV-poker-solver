@@ -1,12 +1,14 @@
-#include "spmv_poker/evaluator.h"
-#include "spmv_poker/game_config.h"
-#include "spmv_poker/range.h"
-#include "spmv_poker/terminal.h"
+#include "spmv_poker/spmv_evaluator.h"
+#include "spmv_poker/spmv_terminal.h"
 
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -18,34 +20,49 @@ uint8_t card(std::string_view name) {
   return static_cast<uint8_t>(ranks.find(name[0]) * 4 + suits.find(name[1]));
 }
 
-Hand hand(std::string_view first, std::string_view second) {
+Hand make_hand(std::string_view first, std::string_view second) {
   uint8_t first_card = card(first);
   uint8_t second_card = card(second);
   return {first_card, second_card,
           card_mask(first_card) | card_mask(second_card)};
 }
 
-Range range(std::initializer_list<Hand> hands) {
+Range make_range(std::initializer_list<Hand> hands) {
   return {std::vector<Hand>(hands), std::vector<float>(hands.size(), 1.0F)};
 }
 
-std::string card_name(uint8_t card) {
+std::string card_name(uint8_t value) {
   constexpr std::string_view ranks = "23456789TJQKA";
   constexpr std::string_view suits = "cdhs";
-  return {ranks[card / 4], suits[card % 4]};
+  return {ranks[value / 4], suits[value % 4]};
 }
 
-std::string hand_name(const Hand &hand) {
-  return card_name(hand.first) + card_name(hand.second);
+std::string hand_name(const Hand &value) {
+  return card_name(value.first) + card_name(value.second);
 }
 
-void print_strategy(const GameTree &tree, const TerminalTables &terminals,
-                    NodeIndex node_index, std::string_view title,
-                    std::span<const std::string_view> actions) {
-  const GameNode &node = tree.nodes[node_index];
-  const DecisionNode &decision = tree.decisions[node.decision_index];
-  std::vector<float> average;
-  tree.state.average_strategy(decision, average);
+StreetTopology make_demo_river_topology(size_t hero_hand_count,
+                                        size_t villain_hand_count) {
+  StreetTopology topology(Street::River, hero_hand_count, villain_hand_count);
+  NodeIndex showdown = topology.add_showdown_node(1.0F, -1.0F);
+  NodeIndex hero_bet_call = topology.add_showdown_node(1.5F, -1.5F);
+  std::array villain_children{showdown, hero_bet_call};
+  NodeIndex villain_after_check =
+      topology.add_player_node(Player::Villain, villain_children);
+  std::array hero_children{villain_after_check, hero_bet_call};
+  topology.root = topology.add_player_node(Player::Hero, hero_children);
+  return topology;
+}
+
+void print_average_strategy(const StreetTree &tree, BoardIndex board,
+                            uint32_t node_slot, std::string_view title,
+                            std::span<const std::string_view> actions,
+                            std::span<const Hand> hands) {
+  const CompiledBackwardNode &node = tree.compiled.nodes[node_slot];
+  std::span<const float> cumulative = tree.board_cumulative_strategy(board);
+  size_t hand_count = hands.size();
+  size_t hand_stride = tree.compiled.padded_hand_counts[static_cast<size_t>(
+      node.player)];
 
   std::cout << "\n" << title << "\n";
   std::cout << std::left << std::setw(8) << "Hand";
@@ -54,13 +71,20 @@ void print_strategy(const GameTree &tree, const TerminalTables &terminals,
   }
   std::cout << '\n';
 
-  for (size_t hand_index = 0; hand_index < decision.hand_count; ++hand_index) {
-    std::cout << std::left << std::setw(8)
-              << hand_name(terminals.hands(node.player)[hand_index]);
-    for (size_t action = 0; action < decision.action_count; ++action) {
+  for (size_t hand = 0; hand < hand_count; ++hand) {
+    std::cout << std::left << std::setw(8) << hand_name(hands[hand]);
+    size_t base = tree.state_entry(board, node_slot, hand, 0);
+    float total = 0.0F;
+    for (size_t action = 0; action < node.action_count; ++action) {
+      total += cumulative[base + action * hand_stride];
+    }
+    for (size_t action = 0; action < node.action_count; ++action) {
+      float average = total > 0.0F
+                          ? cumulative[base + action * hand_stride] /
+                                total
+                          : 1.0F / static_cast<float>(node.action_count);
       std::cout << std::right << std::setw(10) << std::fixed
-                << std::setprecision(1)
-                << 100.0F * average[decision.entry(action, hand_index)] << "%";
+                << std::setprecision(1) << 100.0F * average << "%";
     }
     std::cout << '\n';
   }
@@ -73,47 +97,60 @@ int main() {
 
   std::array<uint8_t, 5> board{card("2c"), card("7d"), card("9h"), card("Js"),
                                card("Kc")};
-  Range hero = range({
-      hand("Ts", "8s"), // Straight
-      hand("As", "Ah"), // Overpair
-      hand("Ks", "Qh"), // Top pair
-      hand("5s", "4s"), // Air
+  Range hero = make_range({
+      make_hand("Ts", "8s"), // Straight
+      make_hand("As", "Ah"), // Overpair
+      make_hand("Ks", "Qh"), // Top pair
+      make_hand("5s", "4s"), // Air
   });
-  Range villain = range({
-      hand("Tc", "8c"), // Straight
-      hand("Ad", "Ac"), // Overpair
-      hand("Kh", "Qd"), // Top pair
-      hand("6c", "3h"), // Air
+  Range villain = make_range({
+      make_hand("Tc", "8c"), // Straight
+      make_hand("Ad", "Ac"), // Overpair
+      make_hand("Kh", "Qd"), // Top pair
+      make_hand("6c", "3h"), // Air
   });
 
   TerminalTables terminals(board, hero, villain);
-  GameConfig config{.starting_pot = 2.0F, .bet_sizes = {0.5F}};
-  GameTree tree = build_game_tree(terminals, config);
-  RecursiveEvaluator evaluator{tree, terminals};
+  StreetTopology topology =
+      make_demo_river_topology(hero.hands.size(), villain.hands.size());
+  StreetTree tree(std::move(topology), make_mask(board), board.size());
+  RankSummaryTerminalOperator terminals_op(terminals, make_mask(board),
+                                           board.size());
+
+  std::array<std::vector<float>, 2> roots{
+      std::vector<float>(tree.compiled.padded_hand_counts[0], 0.0F),
+      std::vector<float>(tree.compiled.padded_hand_counts[1], 0.0F),
+  };
+  std::copy(hero.weights.begin(), hero.weights.end(), roots[0].begin());
+  std::copy(villain.weights.begin(), villain.weights.end(), roots[1].begin());
+
+  std::vector<float> root_values(tree.compiled.padded_hand_counts[0], 0.0F);
+  std::vector<BatchJob> jobs{
+      {.board = 0,
+       .root_reaches = {roots[0], roots[1]},
+       .root_values = root_values,
+       .chance_reach = 1.0F},
+  };
+  BatchContext context;
 
   for (size_t iteration = 1; iteration <= 100000; ++iteration) {
-    evaluator.cfr_iteration(hero, villain, static_cast<float>(iteration));
+    update_batch(tree, jobs, Player::Hero, terminals_op, context,
+                 static_cast<float>(iteration));
   }
 
-  const GameNode &root = tree.nodes[tree.root];
-  auto root_children = tree.children(root);
-  NodeIndex villain_after_check = root_children[0].child;
-  NodeIndex villain_facing_bet = root_children[1].child;
-  NodeIndex hero_facing_bet =
-      tree.children(tree.nodes[villain_after_check])[1].child;
-
+  std::array<std::string_view, 2> root_actions{"Check", "Bet"};
   std::cout << "River: 2c 7d 9h Js Kc\n";
-  std::cout << "Pot: 2.0, bet size: 1.0 (half pot)\n";
-  std::cout << "Hero and Villain each hold one straight, overpair, top pair, "
-               "and air combo.\n";
+  std::cout << "Sample range: 4 hands per player\n";
+  std::cout << "Average strategy at the root after 100000 iterations\n";
+  print_average_strategy(tree, 0, tree.compiled.root_value_slot, "Hero root",
+                         root_actions, hero.hands);
 
-  constexpr std::array<std::string_view, 2> root_actions{"Check", "Bet"};
-  constexpr std::array<std::string_view, 2> response_actions{"Fold", "Call"};
-  print_strategy(tree, terminals, tree.root, "Hero at root", root_actions);
-  print_strategy(tree, terminals, villain_facing_bet, "Villain facing Hero bet",
-                 response_actions);
-  print_strategy(tree, terminals, villain_after_check,
-                 "Villain after Hero checks", root_actions);
-  print_strategy(tree, terminals, hero_facing_bet, "Hero facing Villain bet",
-                 response_actions);
+  std::cout << "\nRoot values\n";
+  for (size_t hand = 0; hand < hero.hands.size(); ++hand) {
+    std::cout << std::left << std::setw(8) << hand_name(hero.hands[hand])
+              << std::right << std::setw(12) << std::fixed
+              << std::setprecision(3) << root_values[hand] << '\n';
+  }
+
+  return EXIT_SUCCESS;
 }

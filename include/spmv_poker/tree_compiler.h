@@ -110,6 +110,8 @@ struct StreetTree {
   std::vector<float> cumulative_strategy;
 
   StreetTree(StreetTopology topology, uint64_t flop_mask);
+  StreetTree(StreetTopology topology, uint64_t public_mask,
+             size_t public_card_count);
 
   [[nodiscard]] size_t state_entry(BoardIndex board, uint32_t node_slot,
                                    size_t hand, size_t action) const;

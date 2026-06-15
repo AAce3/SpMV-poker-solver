@@ -219,7 +219,12 @@ CompiledStreet compile_street(const StreetTopology &topology) {
 }
 
 StreetTree::StreetTree(StreetTopology topology, uint64_t flop_mask)
-    : compiled(compile_street(topology)), board_index(flop_mask),
+    : StreetTree(std::move(topology), flop_mask, FLOP_CARD_COUNT) {}
+
+StreetTree::StreetTree(StreetTopology topology, uint64_t public_mask,
+                       size_t public_card_count)
+    : compiled(compile_street(topology)),
+      board_index(public_mask, public_card_count),
       regrets(board_index.board_count(compiled.street) *
                   compiled.state_entries_per_board,
               0.0F),

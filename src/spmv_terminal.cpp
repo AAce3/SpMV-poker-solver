@@ -50,10 +50,30 @@ float prefix_at(std::span<const float> prefix, size_t channel, size_t group,
 
 } // namespace
 
-TiledRankSummaryRiverTerminalOperator::TiledRankSummaryRiverTerminalOperator(
+void RiverTerminalOperator::mask_board_reaches(BoardIndex, Player,
+                                               std::span<const float> input,
+                                               std::span<float> output) const {
+  assert(input.size() == output.size());
+  std::ranges::copy(input, output.begin());
+}
+
+void RiverTerminalOperator::mask_board_values(BoardIndex, Player,
+                                              std::span<float>) const {}
+
+std::span<const Hand> RankSummaryTerminalOperator::hands(
+    Player player) const {
+  return tables_.hands(player);
+}
+
+RankSummaryTerminalOperator::RankSummaryTerminalOperator(
     const TerminalTables &tables, uint64_t flop_mask)
+    : RankSummaryTerminalOperator(tables, flop_mask, FLOP_CARD_COUNT) {}
+
+RankSummaryTerminalOperator::RankSummaryTerminalOperator(
+    const TerminalTables &tables, uint64_t public_mask,
+    size_t public_card_count)
     : tables_(tables) {
-  RunoutIndex boards(flop_mask);
+  RunoutIndex boards(public_mask, public_card_count);
   std::unordered_map<uint64_t, uint32_t> runout_by_mask;
   runout_by_mask.reserve(tables.runouts.size());
   for (size_t runout = 0; runout < tables.runouts.size(); ++runout) {
@@ -118,6 +138,20 @@ TiledRankSummaryRiverTerminalOperator::TiledRankSummaryRiverTerminalOperator(
   }
 
   for (Player evaluated_player : {Player::Hero, Player::Villain}) {
+    size_t player_index = static_cast<size_t>(evaluated_player);
+    auto hands = tables_.hands(evaluated_player);
+    auto &reach_masks = board_reach_masks_[player_index];
+    reach_masks.resize(runout_by_river_board_.size() * hands.size(), 1.0F);
+    for (BoardIndex board = 0; board < runout_by_river_board_.size();
+         ++board) {
+      uint64_t board_mask =
+          make_mask(tables_.runouts[runout_by_river_board_[board]]);
+      float *mask = reach_masks.data() + board * hands.size();
+      for (size_t hand = 0; hand < hands.size(); ++hand) {
+        mask[hand] = (hands[hand].mask & board_mask) == 0 ? 1.0F : 0.0F;
+      }
+    }
+
     std::array<int32_t, DECK_SIZE * DECK_SIZE> opponent_by_hand;
     opponent_by_hand.fill(-1);
     auto opponent_hands = tables_.hands(opponent(evaluated_player));
@@ -135,13 +169,13 @@ TiledRankSummaryRiverTerminalOperator::TiledRankSummaryRiverTerminalOperator(
   }
 }
 
-size_t TiledRankSummaryRiverTerminalOperator::runout_for_board(
+size_t RankSummaryTerminalOperator::runout_for_board(
     BoardIndex board) const {
   assert(board < runout_by_river_board_.size());
   return runout_by_river_board_[board];
 }
 
-size_t TiledRankSummaryRiverTerminalOperator::showdown_summary_scratch_floats(
+size_t RankSummaryTerminalOperator::showdown_summary_scratch_floats(
     std::span<const BoardIndex> boards, size_t showdown_count) const {
   size_t max_group_count = 0;
   for (BoardIndex board : boards) {
@@ -154,13 +188,13 @@ size_t TiledRankSummaryRiverTerminalOperator::showdown_summary_scratch_floats(
          SUMMARY_CHANNEL_COUNT * max_group_count;
 }
 
-void TiledRankSummaryRiverTerminalOperator::reserve_showdown_summary_scratch(
+void RankSummaryTerminalOperator::reserve_showdown_summary_scratch(
     std::span<const BoardIndex> boards, size_t showdown_count) const {
   showdown_summary_scratch_.resize(
       showdown_summary_scratch_floats(boards, showdown_count));
 }
 
-void TiledRankSummaryRiverTerminalOperator::evaluate_folds(
+void RankSummaryTerminalOperator::evaluate_folds(
     BoardIndex, Player evaluated_player,
     std::span<const float> opponent_reaches, size_t opponent_hand_stride,
     std::span<const float> payoffs, std::span<float> values,
@@ -216,7 +250,38 @@ void TiledRankSummaryRiverTerminalOperator::evaluate_folds(
   }
 }
 
-void TiledRankSummaryRiverTerminalOperator::evaluate_fold_board_batch(
+void RankSummaryTerminalOperator::mask_board_reaches(
+    BoardIndex board, Player player, std::span<const float> input,
+    std::span<float> output) const {
+  assert(input.size() == output.size());
+  size_t runout = runout_for_board(board);
+  auto hands = tables_.hands(player);
+  assert(input.size() >= hands.size());
+  std::ranges::copy(input, output.begin());
+  const float *mask =
+      board_reach_masks_[static_cast<size_t>(player)].data() +
+      runout * hands.size();
+  for (size_t hand = 0; hand < hands.size(); ++hand) {
+    output[hand] *= mask[hand];
+  }
+  std::ranges::fill(output.subspan(hands.size()), 0.0F);
+}
+
+void RankSummaryTerminalOperator::mask_board_values(
+    BoardIndex board, Player player, std::span<float> values) const {
+  size_t runout = runout_for_board(board);
+  auto hands = tables_.hands(player);
+  assert(values.size() >= hands.size());
+  const float *mask =
+      board_reach_masks_[static_cast<size_t>(player)].data() +
+      runout * hands.size();
+  for (size_t hand = 0; hand < hands.size(); ++hand) {
+    values[hand] *= mask[hand];
+  }
+  std::ranges::fill(values.subspan(hands.size()), 0.0F);
+}
+
+void RankSummaryTerminalOperator::evaluate_fold_board_batch(
     std::span<const BoardIndex> boards, Player evaluated_player,
     std::span<const float> opponent_reaches, size_t opponent_hand_stride,
     std::span<const float> payoffs, std::span<float> values,
@@ -267,7 +332,7 @@ void TiledRankSummaryRiverTerminalOperator::evaluate_fold_board_batch(
   }
 }
 
-void TiledRankSummaryRiverTerminalOperator::evaluate_showdowns(
+void RankSummaryTerminalOperator::evaluate_showdowns(
     BoardIndex board, Player evaluated_player,
     std::span<const float> opponent_reaches, size_t opponent_hand_stride,
     std::span<const CompiledShowdown> showdowns, std::span<float> values,
@@ -371,7 +436,7 @@ void TiledRankSummaryRiverTerminalOperator::evaluate_showdowns(
   }
 }
 
-void TiledRankSummaryRiverTerminalOperator::evaluate_showdown_board_batch(
+void RankSummaryTerminalOperator::evaluate_showdown_board_batch(
     std::span<const BoardIndex> boards, Player evaluated_player,
     std::span<const float> opponent_reaches, size_t opponent_hand_stride,
     std::span<const CompiledShowdown> showdowns, std::span<float> values,

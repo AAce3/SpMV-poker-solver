@@ -14,6 +14,44 @@ namespace {
 
 using namespace spmv_poker;
 
+uint8_t card(std::string_view name) {
+  constexpr std::string_view ranks = "23456789TJQKA";
+  constexpr std::string_view suits = "cdhs";
+  return static_cast<uint8_t>(ranks.find(name[0]) * 4 + suits.find(name[1]));
+}
+
+Hand make_hand(std::string_view first, std::string_view second) {
+  uint8_t first_card = card(first);
+  uint8_t second_card = card(second);
+  return {first_card, second_card,
+          card_mask(first_card) | card_mask(second_card)};
+}
+
+Range make_range(std::initializer_list<Hand> hands) {
+  return {std::vector<Hand>(hands), std::vector<float>(hands.size(), 1.0F)};
+}
+
+Range first_hands(std::span<const Hand> hands, size_t count) {
+  return {std::vector<Hand>(hands.begin(), hands.begin() + count),
+          std::vector<float>(count, 1.0F)};
+}
+
+Range last_hands(std::span<const Hand> hands, size_t count) {
+  return {std::vector<Hand>(hands.end() - count, hands.end()),
+          std::vector<float>(count, 1.0F)};
+}
+
+Range masked_range(const Range &range, uint64_t board_mask) {
+  Range masked;
+  for (size_t index = 0; index < range.hands.size(); ++index) {
+    if ((range.hands[index].mask & board_mask) == 0) {
+      masked.hands.push_back(range.hands[index]);
+      masked.weights.push_back(range.weights[index]);
+    }
+  }
+  return masked;
+}
+
 void check(bool condition, std::string_view message) {
   if (!condition) {
     throw std::runtime_error(std::string(message));
@@ -58,6 +96,100 @@ TestGame make_game() {
           first_showdown,  second_showdown};
 }
 
+StreetTopology make_river_topology(size_t hero_hand_count,
+                                   size_t villain_hand_count,
+                                   float starting_pot,
+                                   std::span<const float> bet_sizes) {
+  StreetTopology topology(Street::River, hero_hand_count, villain_hand_count);
+  assert(starting_pot > 0.0F);
+  assert(!bet_sizes.empty());
+  float showdown_payoff = 0.5F * starting_pot;
+
+  std::vector<NodeIndex> villain_after_check_children;
+  std::vector<NodeIndex> hero_root_children;
+  std::vector<NodeIndex> villain_bet_calls;
+  std::vector<NodeIndex> hero_bet_calls;
+  villain_after_check_children.reserve(bet_sizes.size() + 1);
+  hero_root_children.reserve(bet_sizes.size() + 1);
+  villain_bet_calls.reserve(bet_sizes.size());
+  hero_bet_calls.reserve(bet_sizes.size());
+
+  for (float bet_size : bet_sizes) {
+    float called_payoff = showdown_payoff + bet_size * starting_pot;
+    hero_bet_calls.push_back(
+        topology.add_showdown_node(called_payoff, -called_payoff));
+    villain_bet_calls.push_back(
+        topology.add_showdown_node(called_payoff, -called_payoff));
+  }
+
+  NodeIndex checked_showdown =
+      topology.add_showdown_node(showdown_payoff, -showdown_payoff);
+  villain_after_check_children.push_back(checked_showdown);
+
+  for (size_t bet = 0; bet < bet_sizes.size(); ++bet) {
+    std::array response_children{hero_bet_calls[bet]};
+    hero_root_children.push_back(topology.add_player_node(
+        Player::Villain, response_children, showdown_payoff));
+
+    std::array checked_response_children{villain_bet_calls[bet]};
+    villain_after_check_children.push_back(topology.add_player_node(
+        Player::Hero, checked_response_children, -showdown_payoff));
+  }
+
+  NodeIndex villain_after_check =
+      topology.add_player_node(Player::Villain, villain_after_check_children);
+  hero_root_children.insert(hero_root_children.begin(), villain_after_check);
+  topology.root = topology.add_player_node(Player::Hero, hero_root_children);
+  return topology;
+}
+
+StreetTopology make_turn_boundary_topology(size_t hero_hand_count,
+                                           size_t villain_hand_count) {
+  StreetTopology topology(Street::Turn, hero_hand_count, villain_hand_count);
+  NodeIndex showdown = topology.add_showdown_node(1.0F, -1.0F);
+  NodeIndex boundary = topology.add_boundary_node();
+  std::array villain_children{showdown, boundary};
+  NodeIndex villain =
+      topology.add_player_node(Player::Villain, villain_children, -1.0F);
+  std::array hero_children{villain, showdown};
+  topology.root = topology.add_player_node(Player::Hero, hero_children, -2.0F);
+  return topology;
+}
+
+StreetTopology make_turn_continuation_topology(size_t hero_hand_count,
+                                               size_t villain_hand_count) {
+  StreetTopology topology(Street::Turn, hero_hand_count, villain_hand_count);
+  NodeIndex boundary = topology.add_boundary_node();
+  std::array villain_children{boundary};
+  NodeIndex villain =
+      topology.add_player_node(Player::Villain, villain_children, -1.0F);
+  std::array hero_children{villain};
+  topology.root = topology.add_player_node(Player::Hero, hero_children, -2.0F);
+  return topology;
+}
+
+StreetTopology make_flop_boundary_topology(size_t hero_hand_count,
+                                           size_t villain_hand_count) {
+  StreetTopology topology(Street::Flop, hero_hand_count, villain_hand_count);
+  NodeIndex boundary = topology.add_boundary_node();
+  std::array hero_children{boundary};
+  topology.root = topology.add_player_node(Player::Hero, hero_children);
+  return topology;
+}
+
+BoardIndex board_for_mask(const RunoutIndex &boards, uint64_t target_mask) {
+  for (BoardIndex board = 0; board < boards.board_count(Street::River);
+       ++board) {
+    if (boards.board_mask(Street::River, board) == target_mask) {
+      return board;
+    }
+  }
+  throw std::runtime_error("missing board target=" +
+                           std::to_string(target_mask) +
+                           " count=" +
+                           std::to_string(boards.board_count(Street::River)));
+}
+
 TestGame make_game(const TerminalTables &tables) {
   StreetTopology topology(
       Street::River, tables.hands(Player::Hero).size(),
@@ -97,6 +229,8 @@ void set_regrets(TestGame &test) {
 struct TestTerminalOperator : RiverTerminalOperator {
   mutable bool evaluated_folds = false;
   mutable bool evaluated_showdowns = false;
+
+  std::span<const Hand> hands(Player) const override { return {}; }
 
   void evaluate_folds(BoardIndex, Player, std::span<const float>, size_t,
                       std::span<const float> payoffs, std::span<float> values,
@@ -343,7 +477,7 @@ void test_dense_river_board_batch_matches_individual_updates() {
   std::array<std::array<std::vector<float>, 2>, board_count> roots;
   std::array<std::vector<float>, board_count> individual_values;
   std::array<std::vector<float>, board_count> batched_values;
-  std::vector<RiverBoardUpdate> jobs;
+  std::vector<BatchJob> jobs;
   jobs.reserve(board_count);
   for (size_t board = 0; board < board_count; ++board) {
     roots[board][0].resize(width);
@@ -370,9 +504,9 @@ void test_dense_river_board_batch_matches_individual_updates() {
                  0.25F * static_cast<float>(board + 1), 2.0F);
   }
 
-  RiverBoardBatchBuffers batch_buffers;
-  update_river_boards(batched.game, jobs, Player::Hero, terminals,
-                      batch_buffers, 2.0F);
+  BatchContext batch_context;
+  update_batch(batched.game, jobs, Player::Hero, terminals, batch_context,
+               2.0F);
 
   for (size_t board = 0; board < board_count; ++board) {
     for (size_t hand = 0; hand < width; ++hand) {
@@ -394,6 +528,7 @@ void test_dense_river_board_batch_matches_individual_updates() {
       static_cast<size_t>(
           batched.game.compiled.forward_plans[1].workspace_slot_count) *
           width;
+  const BatchBuffers &batch_buffers = batch_context.frames[0].buffers;
   check(batch_buffers.reaches[0].size() + batch_buffers.reaches[1].size() ==
             board_count * expected_reach_floats_per_board,
         "board batch reach workspace has a dense board dimension");
@@ -408,7 +543,7 @@ void test_rank_summary_terminal_board_batch_integration() {
   TerminalTables tables(flop);
   TestGame individual = make_game(tables);
   TestGame batched = make_game(tables);
-  TiledRankSummaryRiverTerminalOperator terminals(tables, make_mask(flop));
+  RankSummaryTerminalOperator terminals(tables, make_mask(flop));
 
   size_t width = individual.game.compiled.padded_hand_counts[0];
   constexpr size_t board_count = 3;
@@ -416,7 +551,7 @@ void test_rank_summary_terminal_board_batch_integration() {
   std::array<std::array<std::vector<float>, 2>, board_count> roots;
   std::array<std::vector<float>, board_count> individual_values;
   std::array<std::vector<float>, board_count> batched_values;
-  std::vector<RiverBoardUpdate> jobs;
+  std::vector<BatchJob> jobs;
   jobs.reserve(board_count);
   for (size_t board = 0; board < board_count; ++board) {
     for (Player player : {Player::Hero, Player::Villain}) {
@@ -448,9 +583,9 @@ void test_rank_summary_terminal_board_batch_integration() {
                  0.25F * static_cast<float>(board + 1), 1.5F);
   }
 
-  RiverBoardBatchBuffers batch_buffers;
-  update_river_boards(batched.game, jobs, Player::Hero, terminals,
-                      batch_buffers, 1.5F);
+  BatchContext batch_context;
+  update_batch(batched.game, jobs, Player::Hero, terminals, batch_context,
+               1.5F);
 
   for (size_t board = 0; board < board_count; ++board) {
     for (size_t hand = 0; hand < width; ++hand) {
@@ -473,6 +608,7 @@ void test_rank_summary_terminal_board_batch_integration() {
       static_cast<size_t>(
           batched.game.compiled.forward_plans[1].workspace_slot_count) *
           width;
+  const BatchBuffers &batch_buffers = batch_context.frames[0].buffers;
   check(batch_buffers.reaches[0].size() + batch_buffers.reaches[1].size() ==
             board_count * expected_reach_floats_per_board,
         "rank-summary board batch reach workspace has a dense board dimension");
@@ -480,6 +616,89 @@ void test_rank_summary_terminal_board_batch_integration() {
             board_count *
                 batched.game.compiled.value_workspace_slot_count * width,
         "rank-summary board batch value workspace has a dense board dimension");
+}
+
+void test_boundary_continuation_sub_batching() {
+  std::array<uint8_t, 3> flop{2, 5, 8};
+  std::array<uint8_t, 4> turn{2, 5, 8, 13};
+  TerminalTables full(turn);
+  Range hero = first_hands(full.hands(Player::Hero), 8);
+  Range villain = last_hands(full.hands(Player::Villain), 8);
+  TerminalTables terminals(turn, hero, villain);
+  uint64_t turn_mask = make_mask(turn);
+  RankSummaryTerminalOperator river_terminals(terminals, turn_mask,
+                                              turn.size());
+
+  StreetTopology single_turn_topology =
+      make_turn_boundary_topology(hero.hands.size(), villain.hands.size());
+  StreetTopology batched_turn_topology =
+      make_turn_boundary_topology(hero.hands.size(), villain.hands.size());
+  StreetTopology single_river_topology = make_river_topology(
+      hero.hands.size(), villain.hands.size(), 2.0F, std::array{0.5F});
+  StreetTopology batched_river_topology = make_river_topology(
+      hero.hands.size(), villain.hands.size(), 2.0F, std::array{0.5F});
+
+  StreetTree single_turn(std::move(single_turn_topology), turn_mask,
+                         turn.size());
+  StreetTree batched_turn(std::move(batched_turn_topology), turn_mask,
+                          turn.size());
+
+  size_t width = single_turn.compiled.padded_hand_counts[0];
+  std::array<std::vector<float>, 2> roots{
+      std::vector<float>(width, 0.0F), std::vector<float>(width, 0.0F)};
+  for (size_t hand = 0; hand < width; ++hand) {
+    roots[0][hand] = static_cast<float>((hand * 7 + 3) % 17) / 17.0F;
+    roots[1][hand] = static_cast<float>((hand * 5 + 11) % 19) / 19.0F;
+  }
+
+  std::array<BoardIndex, 1> boards{0};
+  std::vector<BatchJob> single_jobs;
+  std::vector<BatchJob> batched_jobs;
+  std::vector<std::vector<float>> single_values(boards.size(),
+                                                std::vector<float>(width));
+  std::vector<std::vector<float>> batched_values(boards.size(),
+                                                 std::vector<float>(width));
+  for (size_t index = 0; index < boards.size(); ++index) {
+    single_jobs.push_back({
+        .board = boards[index],
+        .root_reaches = {roots[0], roots[1]},
+        .root_values = single_values[index],
+      .chance_reach = 1.0F,
+    });
+    batched_jobs.push_back({
+        .board = boards[index],
+        .root_reaches = {roots[0], roots[1]},
+        .root_values = batched_values[index],
+        .chance_reach = 1.0F,
+    });
+  }
+
+  BatchContext single_context;
+  BatchContext batched_context;
+  std::array<StreetTree, 1> single_future_trees{
+      StreetTree(std::move(single_river_topology), turn_mask, turn.size())};
+  std::array<StreetTree, 1> batched_future_trees{
+      StreetTree(std::move(batched_river_topology), turn_mask, turn.size())};
+  update_turn(single_turn, single_future_trees, single_jobs, Player::Hero,
+              river_terminals, single_context, 1.0F, 0);
+  update_turn(batched_turn, batched_future_trees, batched_jobs, Player::Hero,
+              river_terminals, batched_context, 1.0F, 7);
+
+  for (size_t board = 0; board < boards.size(); ++board) {
+    for (size_t hand = 0; hand < width; ++hand) {
+      check_near(single_values[board][hand], batched_values[board][hand],
+                 "boundary continuation sub-batch root values match");
+    }
+  }
+  for (size_t entry = 0; entry < single_turn.regrets.size(); ++entry) {
+    check_near(single_turn.regrets[entry], batched_turn.regrets[entry],
+               "boundary continuation sub-batch regrets match");
+    check_near(single_turn.cumulative_strategy[entry],
+               batched_turn.cumulative_strategy[entry],
+               "boundary continuation sub-batch strategy match");
+  }
+  check(single_turn.compiled.street == Street::Turn,
+        "hardcoded turn wrapper preserves the street type");
 }
 
 } // namespace
@@ -494,6 +713,7 @@ int main() {
     test_river_update_orchestration();
     test_dense_river_board_batch_matches_individual_updates();
     test_rank_summary_terminal_board_batch_integration();
+    test_boundary_continuation_sub_batching();
   } catch (const std::exception &error) {
     std::cerr << "Test failure: " << error.what() << '\n';
     return EXIT_FAILURE;
