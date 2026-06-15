@@ -34,8 +34,6 @@ FetchContent_MakeAvailable(poker_hand_evaluator)
 
 add_library(poker_core
     src/decision_node.cpp
-    src/evaluator.cpp
-    src/game_config.cpp
     src/game_tree.cpp
     src/range.cpp
     src/spmv_terminal.cpp
@@ -47,8 +45,8 @@ add_library(poker_core
 target_include_directories(poker_core PUBLIC include)
 target_link_libraries(poker_core PRIVATE pheval7)
 
-add_executable(poker_solver src/main.cpp)
-target_link_libraries(poker_solver PRIVATE poker_core)
+add_executable(spmv_solver src/main.cpp)
+target_link_libraries(spmv_solver PRIVATE poker_core)
 
 enable_testing()
 
@@ -64,10 +62,6 @@ add_executable(game_tree_tests tests/game_tree_test.cpp)
 target_link_libraries(game_tree_tests PRIVATE poker_core)
 add_test(NAME game_tree_tests COMMAND game_tree_tests)
 
-add_executable(evaluator_tests tests/evaluator_test.cpp)
-target_link_libraries(evaluator_tests PRIVATE poker_core)
-add_test(NAME evaluator_tests COMMAND evaluator_tests)
-
 add_executable(spmv_tree_tests tests/spmv_tree_test.cpp)
 target_link_libraries(spmv_tree_tests PRIVATE poker_core)
 add_test(NAME spmv_tree_tests COMMAND spmv_tree_tests)
@@ -76,10 +70,10 @@ add_executable(spmv_evaluator_tests tests/spmv_evaluator_test.cpp)
 target_link_libraries(spmv_evaluator_tests PRIVATE poker_core)
 add_test(NAME spmv_evaluator_tests COMMAND spmv_evaluator_tests)
 
-add_executable(tree_compiler_tests tests/tree_compiler_test.cpp)
-target_link_libraries(tree_compiler_tests PRIVATE poker_core)
-add_test(NAME tree_compiler_tests COMMAND tree_compiler_tests)
-
 add_executable(spmv_terminal_tests tests/spmv_terminal_test.cpp)
 target_link_libraries(spmv_terminal_tests PRIVATE poker_core)
 add_test(NAME spmv_terminal_tests COMMAND spmv_terminal_tests)
+
+add_executable(tree_compiler_tests tests/tree_compiler_test.cpp)
+target_link_libraries(tree_compiler_tests PRIVATE poker_core)
+add_test(NAME tree_compiler_tests COMMAND tree_compiler_tests)
