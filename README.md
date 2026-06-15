@@ -1,14 +1,16 @@
 ## Overview
 
-This is an experimental project to analyze the viability of implementing an SpMV-based poker solver, based on the work [GPU-Accelerated Counterfactual Regret Minimization](https://arxiv.org/pdf/2408.14778) by Prof. Juho Kim at the University of Toronto. 
+This project is an experimental poker solver built around CFR (Counterfactual Regret Minimization). The goal is to keep the solver structure simple enough to reason about, but organized in a way that can later scale to larger games and faster backends.
 
-### CFR Algorithm:
+The key idea in CFR is that each player repeatedly updates their strategy based on the EV of each action. Over time, positive and negative regrets push the strategy toward equilibrium.
 
-Traditional poker solvers use a technique called CFR (Counterfactual Regret) to iteratively refine a strategy (action probability for a certain state). CFR will iterate on a strategy until it finds an equilibrium, in which the EV of each action is identical. 
+### CFR Algorithm
+
+Traditional poker solvers use CFR to iteratively refine strategy. A strategy is the action probability for a given state, and CFR keeps adjusting those probabilities until the EV of each action becomes equal.
 
 Suppose on the river, we have the following game tree:
 
-```
+```text
 Root
 ├── Hero check
 │   ├── Villain check
@@ -25,289 +27,97 @@ Root
         └── Showdown (EV is determined by ranges)
 ```
 
-Suppose that Hero's initial strategy is to check 50% of the time and bet 50% of the time. 
+Suppose Hero starts by checking 50% of the time and betting 50% of the time.
 
-The CFR algorithm will then take the following steps:
-First, it will compute the EV of the entire 'check' subtree and the entire 'bet' subtree based on the fixed strategies of the Hero and the Villain. In other words, we compute $\sum_{\text{all trajectories } t} V(t)p(t)$ across all trajectories (e.g. Hero Bet/Villain Call, or Hero Check/Villain Check), where $p$ is the probability of taking that trajectory and $V$ is the value of said trajectory. 
+The first CFR step is to evaluate the EV of the full `check` subtree and the full `bet` subtree using the current strategies. If betting has EV 7 and checking has EV 3, then the algorithm increases the probability of betting on the next iteration.
 
-Suppose in this case that the EV of bet is 7, and the EV of check is 3. Thus, the EV of betting is higher than the EV of checking, meaning that the algorithm will adjust their strategy to bet more often in the next iteration. 
+#### Regret Matching
 
-##### Regret Matching
+To decide how much to change the strategy, CFR converts action EVs into regrets.
 
-To determine how much more often to bet, CFR first converts the action EVs into regret deltas by comparing each action against the EV of the current strategy
-
-CFR keeps a running regret value $R(a)$ for each action. After each iteration, the new regret delta is added to this accumulated value $R(a) \leftarrow R(a) + \Delta R(a)$
-
-From the example above, we have $\Delta R(\text{check}) = -2, \space \Delta R(\text{bet}) = 2$. If the previous accumulated regrets were $R(\text{check}) = 5,  \space R(\text{bet}) = 5$, then after this update, we have $R(\text{check}) = 5 - 2 = 3$ and $R(\text{bet}) = 5 + 2 = 7$
-
-To get the next strategy, CFR ignores negative regrets and normalizes the positive ones:
-
-$p(a) = \frac{\max(R(a), 0)}{\sum_{a'} \max(R(a'), 0)}$
-
-So,  we have $p(\text{check}) = \frac{3}{3+7} = 0.3$ and $p(\text{bet}) = \frac{7}{3+7} = 0.7$
-
-Thus, the next strategy checks 30% of the time and bets 70% of the time.
-
-##### Recursive Strategy Updates
-
-Of course, the villain's strategy does not remain constant either. Suppose we zoom into the "Hero Check" node:
-
-```
-Hero check
-├── Villain check
-│   └── Showdown
-└── Villain bet
-    ├── Hero fold
-    │   └── Hero loses pot
-    └── Hero call
-        └── Showdown (EV is determined by ranges)
-```
-
-CFR will do the same thing for villain's decision. It will compute the EV of Villain checking, and the EV of villain betting, and update its strategy accordingly.
-
-
-##### Information Sets
-
-In poker, CFR does not update strategies for fully-known game states where both players' hands are visible. Instead, it updates strategies for information sets, which represent what the player actually knows when making a decision.
-
-For example, when Hero faces a river bet, Hero knows their own hand, the board, and the betting history, but not Villain's exact hand. So an information set can be thought of as: $I = (\text{Hero hand}, \text{board}, \text{betting history})$
-
-All possible Villain hands that could have reached this spot are grouped into the same information set from Hero's perspective. Therefore, when CFR computes $\text{EV}(\text{call})$ or $\text{EV}(\text{fold})$, it is not evaluating against one specific Villain hand. It is averaging over Villain's possible hands, weighted by how likely each hand is to reach this spot.
-
-This changes the regret update slightly. Instead of updating regret using a single action EV, CFR uses the expected action EV over all hidden states inside the information set: 
-
-$\Delta R(I,a) = \text{EV}(I,a) - \text{EV}(I)$,
-
-where $\text{EV}(I,a)$ already includes the weighted average over possible Villain hands. In other words, the same regret matching process applies, but the EVs are computed over an information set rather than a fully-known game state. 
-
-To compute this weighted average, CFR needs reach probabilities. A reach probability tells us how likely a particular hidden state is under the current strategy. For example, if Villain is very likely to reach this river spot with one hand but almost never reaches it with another, the first hand should contribute much more to Hero's action EV. Thus, reach probabilities determine the weights used when averaging over the hidden states inside an information set.
-
-### Converting to Matrix Multiplications
-
-
-The main computational workload of CFR consists essentially of two phases.
-1. Downward pass to compute probability of each node
-2. Upwards propagation to compute EV and regret
-
-
-For demonstration, imagine a toy game tree:
-```
-        root
-       /    \
-      A      B
-     / \    / \
-    T1 T2  T3 T4
-```
-
-And our strategy is the following:
-
-| Action   | Probability |
-| -------- | ----------- |
-| Root → A | 0.6         |
-| Root → B | 0.4         |
-| A → T1   | 0.2         |
-| A → T2   | 0.8         |
-| B → T3   | 0.5         |
-| B → T4   | 0.5         |
-
-We can write this in terms of a transition matrix. Number the nodes 0 = root, 1 = A, 2 = B, 3 = T1...
-
-The tree can be represented as a sparse transition matrix $M$, where each nonzero entry corresponds to an edge in the tree and stores the probability of taking that edge:
+The accumulated regret for an action is updated each iteration:
 
 $$
-M =
-\begin{bmatrix}
-0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0.6 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0.4 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0.2 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0.8 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0.5 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0.5 & 0 & 0 & 0 & 0
-\end{bmatrix}
+R(a) \leftarrow R(a) + \Delta R(a)
 $$
 
-The first use of Matrix-Vector multiplication is the upward EV pass. Once terminal utilities are known, we can propagate values back toward the root using the transpose of this matrix with the formula $v_{\text{parent}} = M^T v_{\text{child}}$.
-
-To visualize how this works, suppose the terminal values are
-
-| Terminal | Value |
-| -------- | ----- |
-| T1       | 10    |
-| T2       | -5    |
-| T3       | 2     |
-| T4       | -8    |
-
-Normally, to compute the values of A and B, we would have $v(A) = 0.2 \cdot v(T_1) + 0.8 \cdot v(T_2) = -2$, and similarly $v(B) = 0.5\cdot v(T_3) + 0.5\cdot v(T_4) = -3$. However, we can reformat this in terms of a matrix-vector multiplication. 
-
-Represent the values as a vector over all nodes:
-
-$$v =
-\begin{bmatrix}
-0 \\
-0 \\
-0 \\
-10 \\
--5 \\
-2 \\
--8
-\end{bmatrix}
-$$
-
-To propagate EV upward, we multiply by the transpose of our transition matrix:
+If checking is below the current strategy EV and betting is above it, the regrets move in opposite directions. CFR then uses only the positive regrets and normalizes them:
 
 $$
-M^T v =
-\begin{bmatrix}
-0 & 0.6 & 0.4 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0.2 & 0.8 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0.5 & 0.5 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0
-\end{bmatrix}
-\begin{bmatrix}
-0 \\
-0 \\
-0 \\
-10 \\
--5 \\
-2 \\
--8
-\end{bmatrix}
+p(a) = \frac{\max(R(a), 0)}{\sum_{a'} \max(R(a'), 0)}
 $$
 
+That normalized value becomes the next strategy.
 
-This gives us
+#### Recursive Strategy Updates
 
-$$
-M^T v =
-\begin{bmatrix}
-0 \\
--2 \\
--3 \\
-0 \\
-0 \\
-0
-\end{bmatrix}
-$$
+The same process applies at every decision node. If we zoom into the `Hero check` branch, Villain’s strategy is also updated from the EVs of Villain’s available actions.
 
-So one MV multiplication gives us the EVs of the immediate parent nodes.
-Then we apply the same idea again to push values from $A$ and $B$ back to the root.
+#### Information Sets
 
-$$
-v =
-\begin{bmatrix}
-0 \\
--2 \\
--3 \\
-0 \\
-0 \\
-0 \\
-0
-\end{bmatrix}
-$$
+CFR does not update a strategy for fully observed game states. It updates information sets: what a player knows when making a decision.
+
+For example, when Hero faces a river bet, Hero knows:
+
+- their own hand
+- the board
+- the betting history
+
+but not Villain’s exact hand.
+
+So an information set is really:
 
 $$
-M^T v =
-\begin{bmatrix}
--2.4 \\
-0 \\
-0 \\
-0 \\
-0 \\
-0 \\
-0
-\end{bmatrix}
+I = (\text{Hero hand}, \text{board}, \text{betting history})
 $$
 
-In other words, the upward EV pass is just repeated sparse matrix-vector multiplication with $M^T$.
+The EV of each action is then averaged over all hidden opponent hands that could have reached the spot, weighted by their reach probabilities.
 
-We can use these EVs to compute regret values. 
-However, we also need reach probability, i.e. how likely each node is under the current strategy, in order to correctly apply the weighted regret update. We compute them with the same sparse matrix vector multiplication, but in the downward direction, using the formula $r_{\text{child}} = M r_{\text{parent}}$.
+## Architecture
 
-Starting from the root,
+The main idea is that there is a lot of shared structure inside a street, and
+we take advantage of that by compiling the street once into an execution plan
+that is reused across boards and across iterations.
 
+For a given street, the betting structure does not change from board to board.
+The same actions exist, the same decision nodes exist, and the same traversal
+order exists. What changes is the concrete board state and the hand values
+attached to that board. The solver separates those two concerns: the street is
+compiled once into a fixed execution plan, and each board carries its own
+regrets, strategies, and reach values. That means the hot path is not rebuilding
+tree structure. It is reusing the same compiled plan across many boards and many
+iterations.
 
-$$
-r =
-\begin{bmatrix}
-1 \\
-0 \\
-0 \\
-0 \\
-0 \\
-0 \\
-0
-\end{bmatrix}
-$$
+The board dimension is treated as a batch dimension. The evaluator can process
+multiple boards in one pass while using the same compiled street plan. That is
+useful because the traversal order is shared, the action layout is shared, the
+decision nodes are shared, and only the board-specific values differ. This
+shared structure is the main reason the current implementation is organized the
+way it is.
 
-we can compute
+The evaluator also uses reusable scratch memory for reach propagation, value
+propagation, and street continuation. The goal is to avoid allocating temporary
+vectors inside the hot path. The solver does more planning up front so repeated
+iterations can reuse the same buffers.
 
-$$
-Mr =
-\begin{bmatrix}
-0 \\
-0.6 \\
-0.4 \\
-0 \\
-0 \\
-0 \\
-0
-\end{bmatrix}
-$$
+Terminal evaluation is separated from tree traversal. The evaluator asks the
+terminal layer for fold values, showdown values, and board-specific masking.
+This keeps terminal logic separate from traversal logic, which makes both parts
+easier to change independently.
 
-So $A$ is reached with probability $0.6$, and $B$ is reached with probability $0.4$.
+Hero and Villain use separate hand tables. That avoids forcing both players into
+the same hand universe when their ranges differ. The payoff is cleaner solver
+state and less wasted work on hands that are absent from a player’s range.
 
-Applying the matrix again:
-
-
-$$
-M
-\begin{bmatrix}
-0 \\
-0.6 \\
-0.4 \\
-0 \\
-0 \\
-0 \\
-0
-\end{bmatrix}
-= \begin{bmatrix}
-0 \\
-0 \\
-0 \\
-0.12 \\
-0.48 \\
-0.20 \\
-0.20
-\end{bmatrix}
-$$
-
-
-This gives the reach probabilities of the terminal nodes. In the full CFR update, these reach probabilities are used to weight the regret updates.
-
-
-So, each individual CFR iteration becomes
-1. Use the current strategy to fill the transition matrix $M$
-2. Use $M^T v$ to propagate EV upward from terminal nodes
-3. Use $Mr$ to propagate reach probabilities downward from the root
-4. Use the EV and reach probabilities to update regrets
-5. Normalize positive regrets to get the next strategy
-
-### Why SpMV?
-
-SpMV stands for Sparse Matrix-Vector Multiplication. It refers to multiplying a matrix by a vector when most entries in the matrix are zero.
-
-A game tree is naturally sparse. Each node only connects to a few children, even though the full matrix contains an entry for every possible pair of nodes. For example, in the toy tree above, the transition matrix is mostly zeros, and only the actual tree edges contain useful values. Instead of storing the full matrix, SpMV stores only the nonzero entries. Then matrix-vector multiplication becomes a pass over these edges. 
-
-The advantage is that this avoids recursive tree traversal. Instead of walking the game tree node by node, we can process many edges in parallel. This is especially attractive on GPUs, which are designed for large batches of simple numeric operations. And, many highly optimized SpMV routines exist already, for both GPU and for CPU. However, this approach requires more memory.
+Some streets end in a boundary rather than a terminal. In that case, the solver
+can continue into the next street using child jobs built from the current board
+state. This allows turn-root and river-root solves to share the same overall
+solver structure.
 
 
 ## Roadmap:
 
-1. Build a river-only CPU baseline solver using CFR+ to give us a correct reference solver
-2. Convert the solver to a matrix formulation using the algorithms detailed above
-3. Scale to turn and flop subgames
+1. [x] Build a river-only CPU baseline solver using CFR+ to give us a correct reference solver
+2. [x] Convert the solver to a matrix formulation using the algorithms detailed above
+3. [x] Scale to turn and flop subgames
 4. Move to GPU using CUDA
