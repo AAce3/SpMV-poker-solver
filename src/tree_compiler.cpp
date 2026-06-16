@@ -23,6 +23,18 @@ uint32_t player_offset(const StreetTopology &topology, NodeIndex node) {
   return checked_index(node - topology.player_begin());
 }
 
+Street child_street(Street street) {
+  switch (street) {
+  case Street::Flop:
+    return Street::Turn;
+  case Street::Turn:
+    return Street::River;
+  case Street::River:
+    return Street::River;
+  }
+  return Street::River;
+}
+
 struct EndpointLayout {
   std::vector<uint32_t> category_indices;
   std::vector<CompiledShowdown> showdowns;
@@ -136,6 +148,98 @@ CompiledForwardPlan compile_forward_plan(const StreetTopology &topology,
 
 } // namespace
 
+CompiledTransitionGraph
+compile_transition_graph(const RunoutIndex &board_index, Street parent_street) {
+  assert(parent_street != Street::River);
+  CompiledTransitionGraph graph;
+  graph.parent_street = parent_street;
+  graph.child_street = child_street(parent_street);
+
+  size_t parent_count = board_index.board_count(parent_street);
+  graph.child_offsets.resize(parent_count + 1);
+  graph.child_offsets[0] = 0;
+
+  size_t legal_child_count = board_index.child_count(parent_street);
+  float local_weight = 1.0F / static_cast<float>(legal_child_count);
+
+  for (BoardIndex parent = 0; parent < parent_count; ++parent) {
+    uint64_t parent_mask = board_index.board_mask(parent_street, parent);
+    for (uint8_t dealt_card = 0; dealt_card < DECK_SIZE; ++dealt_card) {
+      if ((parent_mask & card_mask(dealt_card)) != 0) {
+        continue;
+      }
+      BoardIndex child =
+          board_index.child_board(parent_street, parent, dealt_card);
+      graph.child_boards.push_back(child);
+      graph.dealt_cards.push_back(dealt_card);
+      graph.local_chance_weights.push_back(local_weight);
+    }
+    graph.child_offsets[parent + 1] =
+        checked_index(graph.child_boards.size());
+  }
+
+  assert(graph.child_boards.size() == graph.dealt_cards.size());
+  assert(graph.child_boards.size() == graph.local_chance_weights.size());
+  assert(graph.child_offsets.back() == graph.child_boards.size());
+  return graph;
+}
+
+ExecutionSchedule build_execution_schedule(const RunoutIndex &board_index,
+                                           Street starting_street,
+                                           size_t turn_row_capacity,
+                                           size_t river_row_capacity) {
+  ExecutionSchedule schedule;
+  schedule.turn_row_capacity = turn_row_capacity;
+  schedule.river_row_capacity = river_row_capacity;
+
+  if (starting_street == Street::River) {
+    return schedule;
+  }
+  assert(turn_row_capacity > 0);
+
+  size_t turn_parent_count = board_index.board_count(Street::Turn);
+  size_t child_per_turn = board_index.child_count(Street::Turn);
+  assert(river_row_capacity >= child_per_turn);
+
+  for (size_t turn_begin = 0; turn_begin < turn_parent_count;) {
+    size_t turn_count = 0;
+    while (turn_begin + turn_count < turn_parent_count &&
+           turn_count < turn_row_capacity) {
+      ++turn_count;
+    }
+
+    TurnGroup turn_group{
+        .parent_row_begin = checked_index(turn_begin),
+        .parent_row_count = checked_index(turn_count),
+        .child_row_count = checked_index(turn_count * child_per_turn),
+    };
+    schedule.turn_groups.push_back(turn_group);
+
+    std::vector<RiverGroup> river_groups;
+    size_t turn_group_end = turn_begin + turn_count;
+    for (size_t river_begin = turn_begin; river_begin < turn_group_end;) {
+      size_t river_count = 0;
+      while (river_begin + river_count < turn_group_end &&
+             (river_count + 1) * child_per_turn <= river_row_capacity) {
+        ++river_count;
+      }
+      if (river_count == 0) {
+        river_count = 1;
+      }
+      river_groups.push_back(RiverGroup{
+          .parent_row_begin = checked_index(river_begin),
+          .parent_row_count = checked_index(river_count),
+          .child_row_count = checked_index(river_count * child_per_turn),
+      });
+      river_begin += river_count;
+    }
+    schedule.river_groups_by_turn_group.push_back(std::move(river_groups));
+    turn_begin = turn_group_end;
+  }
+
+  return schedule;
+}
+
 CompiledStreet compile_street(const StreetTopology &topology) {
   assert(topology.is_player(topology.root));
 
@@ -231,6 +335,13 @@ StreetTree::StreetTree(StreetTopology topology, uint64_t public_mask,
       cumulative_strategy(board_index.board_count(compiled.street) *
                               compiled.state_entries_per_board,
                           0.0F) {}
+
+StreetTree::StreetTree(CompiledStreet compiled, RunoutIndex board_index,
+                       std::vector<float> regrets,
+                       std::vector<float> cumulative_strategy)
+    : compiled(std::move(compiled)), board_index(std::move(board_index)),
+      regrets(std::move(regrets)),
+      cumulative_strategy(std::move(cumulative_strategy)) {}
 
 size_t StreetTree::state_entry(BoardIndex board, uint32_t node_slot,
                                size_t hand, size_t action) const {

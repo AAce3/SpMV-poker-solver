@@ -76,6 +76,162 @@ void compute_regret_matching_factors(std::span<const float> board_regrets,
 
 } // namespace
 
+StreetBatchView OwnedStreetBatch::view() {
+  return StreetBatchView{
+      .boards = std::span<const BoardIndex>(boards),
+      .root_reaches = {std::span<const float>(root_reaches[0]),
+                       std::span<const float>(root_reaches[1])},
+      .root_values = std::span<float>(root_values),
+      .cumulative_chance_reaches =
+          std::span<const float>(cumulative_chance_reaches),
+  };
+}
+
+void validate_batch(const StreetBatchView &batch, const CompiledStreet &compiled,
+                    Player evaluated_player) {
+  size_t board_count = batch.board_count();
+  for (Player player : {Player::Hero, Player::Villain}) {
+    size_t player_index = static_cast<size_t>(player);
+    size_t width = compiled.padded_hand_counts[player_index];
+    assert(batch.root_reaches[player_index].size() == board_count * width);
+  }
+
+  if (!batch.root_values.empty()) {
+    size_t evaluated_index = static_cast<size_t>(evaluated_player);
+    size_t evaluated_width = compiled.padded_hand_counts[evaluated_index];
+    assert(batch.root_values.size() == board_count * evaluated_width);
+  }
+  assert(batch.cumulative_chance_reaches.empty() ||
+         batch.cumulative_chance_reaches.size() == board_count);
+}
+
+OwnedStreetBatch flatten_jobs(std::span<const BatchJob> jobs,
+                              const CompiledStreet &compiled,
+                              Player evaluated_player) {
+  OwnedStreetBatch batch;
+  size_t board_count = jobs.size();
+  batch.boards.resize(board_count);
+  batch.cumulative_chance_reaches.resize(board_count);
+
+  for (Player player : {Player::Hero, Player::Villain}) {
+    size_t player_index = static_cast<size_t>(player);
+    size_t width = compiled.padded_hand_counts[player_index];
+    batch.root_reaches[player_index].resize(board_count * width);
+  }
+
+  size_t evaluated_index = static_cast<size_t>(evaluated_player);
+  size_t evaluated_width = compiled.padded_hand_counts[evaluated_index];
+  batch.root_values.resize(board_count * evaluated_width);
+
+  for (size_t board = 0; board < board_count; ++board) {
+    batch.boards[board] = jobs[board].board;
+    batch.cumulative_chance_reaches[board] = jobs[board].chance_reach;
+
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t player_index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[player_index];
+      auto destination = std::span<float>(batch.root_reaches[player_index])
+                             .subspan(board * width, width);
+      std::ranges::copy(jobs[board].root_reaches[player_index],
+                        destination.begin());
+    }
+
+    auto root_values = std::span<float>(batch.root_values)
+                           .subspan(board * evaluated_width, evaluated_width);
+    std::ranges::copy(jobs[board].root_values, root_values.begin());
+  }
+
+  validate_batch(batch.view(), compiled, evaluated_player);
+  return batch;
+}
+
+void propagate_reaches_batch(const StreetTree &game,
+                             const StreetBatchView &batch,
+                             std::array<std::span<float>, 2> reach_workspaces) {
+  const CompiledStreet &compiled = game.compiled;
+  validate_batch(batch, compiled, Player::Hero);
+  size_t board_count = batch.board_count();
+
+  for (Player player : {Player::Hero, Player::Villain}) {
+    size_t player_index = static_cast<size_t>(player);
+    size_t width = compiled.padded_hand_counts[player_index];
+    const CompiledForwardPlan &plan = compiled.forward_plans[player_index];
+    size_t required = static_cast<size_t>(plan.workspace_slot_count) *
+                      board_count * width;
+    assert(reach_workspaces[player_index].size() >= required);
+    std::span<float> active_workspace =
+        reach_workspaces[player_index].first(required);
+    std::ranges::fill(active_workspace, 0.0F);
+
+    SlotBoardHandView<float> workspace(active_workspace,
+                                       plan.workspace_slot_count, board_count,
+                                       width);
+    BoardHandView<const float> roots(batch.root_reaches[player_index],
+                                     board_count, width);
+
+    for (size_t board = 0; board < board_count; ++board) {
+      std::ranges::copy(
+          roots.hands(board),
+          workspace.hands(plan.root_input_reach_slot, board).begin());
+    }
+
+    for (const CompiledForwardNode &node : plan.nodes) {
+      bool updates_player = node.player == player;
+      float uniform_probability = 1.0F / static_cast<float>(node.action_count);
+
+      for (size_t board = 0; board < board_count; ++board) {
+        std::span<const float> board_regrets =
+            game.board_regrets(batch.boards[board]);
+        auto input = workspace.hands(node.input_reach_slot, board);
+
+        for (size_t hand_begin = 0; hand_begin < width;
+             hand_begin += HAND_BLOCK_SIZE) {
+          auto input_block = input.subspan(hand_begin, HAND_BLOCK_SIZE);
+          if (updates_player) {
+            alignas(64) std::array<float, HAND_BLOCK_SIZE>
+                inverse_positive_sums{};
+            compute_regret_matching_factors(
+                board_regrets, node.cfr_offset_within_board, node.action_begin,
+                node.action_count, hand_begin,
+                std::span<const CompiledForwardAction>(plan.actions),
+                std::span<float, HAND_BLOCK_SIZE>(inverse_positive_sums));
+            for (size_t action = 0; action < node.action_count; ++action) {
+              const CompiledForwardAction &compiled_action =
+                  plan.actions[node.action_begin + action];
+              auto destination =
+                  workspace.hands(compiled_action.destination_slot, board)
+                      .subspan(hand_begin, HAND_BLOCK_SIZE);
+              const float *regrets = board_regrets.data() +
+                                     node.cfr_offset_within_board +
+                                     compiled_action.cfr_action_offset +
+                                     hand_begin;
+              for (size_t lane = 0; lane < HAND_BLOCK_SIZE; ++lane) {
+                float inverse_positive_sum = inverse_positive_sums[lane];
+                float strategy = inverse_positive_sum > 0.0F
+                                     ? std::max(0.0F, regrets[lane]) *
+                                           inverse_positive_sum
+                                     : uniform_probability;
+                destination[lane] += input_block[lane] * strategy;
+              }
+            }
+          } else {
+            for (size_t action = 0; action < node.action_count; ++action) {
+              const CompiledForwardAction &compiled_action =
+                  plan.actions[node.action_begin + action];
+              auto destination =
+                  workspace.hands(compiled_action.destination_slot, board)
+                      .subspan(hand_begin, HAND_BLOCK_SIZE);
+              for (size_t lane = 0; lane < HAND_BLOCK_SIZE; ++lane) {
+                destination[lane] += input_block[lane];
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 void propagate_block(const StreetTree &game, BoardIndex board, Player player,
                      size_t hand_begin, ConstHandBlock root,
                      std::span<float> workspace) {
@@ -514,6 +670,269 @@ void update_chance_root(StreetTree &river, std::span<const BatchJob> jobs,
       root_values[hand] += job.chance_reach * job.root_values[hand];
     }
   }
+}
+
+StreetTree make_tree_from_state(const CompiledStreet &compiled,
+                                const RunoutIndex &board_index,
+                                std::optional<StreetState> &state_slot) {
+  StreetState state;
+  if (state_slot) {
+    state = std::move(*state_slot);
+  }
+
+  size_t board_count = board_index.board_count(compiled.street);
+  size_t expected_entries =
+      board_count * static_cast<size_t>(compiled.state_entries_per_board);
+  if (state.regrets.size() != expected_entries) {
+    state.regrets.assign(expected_entries, 0.0F);
+  }
+  if (state.cumulative_strategy.size() != expected_entries) {
+    state.cumulative_strategy.assign(expected_entries, 0.0F);
+  }
+
+  return StreetTree(compiled, board_index, std::move(state.regrets),
+                    std::move(state.cumulative_strategy));
+}
+
+StreetTree make_tree_from_state(const CompiledStreet &compiled,
+                                const RunoutIndex &board_index,
+                                StreetState &state_slot) {
+  size_t board_count = board_index.board_count(compiled.street);
+  size_t expected_entries =
+      board_count * static_cast<size_t>(compiled.state_entries_per_board);
+  if (state_slot.regrets.size() != expected_entries) {
+    state_slot.regrets.assign(expected_entries, 0.0F);
+  }
+  if (state_slot.cumulative_strategy.size() != expected_entries) {
+    state_slot.cumulative_strategy.assign(expected_entries, 0.0F);
+  }
+
+  return StreetTree(compiled, board_index, std::move(state_slot.regrets),
+                    std::move(state_slot.cumulative_strategy));
+}
+
+void store_tree_state(std::optional<StreetState> &state_slot,
+                      StreetTree &tree) {
+  state_slot = StreetState{
+      .regrets = std::move(tree.regrets),
+      .cumulative_strategy = std::move(tree.cumulative_strategy),
+  };
+}
+
+void store_tree_state(StreetState &state_slot, StreetTree &tree) {
+  state_slot.regrets = std::move(tree.regrets);
+  state_slot.cumulative_strategy = std::move(tree.cumulative_strategy);
+}
+
+void CpuSolveExecutor::update_player(const SolveProgram &program,
+                                     SolveState &state,
+                                     CpuSolveWorkspace &workspace,
+                                     Player player, RootRangesView root_ranges,
+                                     std::span<float> root_values,
+                                     float iteration_weight) {
+  assert(program.board_index.has_value());
+  assert(program.terminals != nullptr);
+  RunoutIndex board_index = *program.board_index;
+  const RiverTerminalOperator &terminals = *program.terminals;
+  size_t player_index = static_cast<size_t>(player);
+  size_t opponent_index = static_cast<size_t>(opponent(player));
+
+  StreetTree flop_tree = program.flop.has_value()
+                             ? make_tree_from_state(*program.flop, board_index,
+                                                    state.flop)
+                             : StreetTree(program.river, board_index,
+                                          std::vector<float>(),
+                                          std::vector<float>());
+  StreetTree turn_tree = program.turn.has_value()
+                             ? make_tree_from_state(*program.turn, board_index,
+                                                    state.turn)
+                             : StreetTree(program.river, board_index,
+                                          std::vector<float>(),
+                                          std::vector<float>());
+  StreetTree river_tree =
+      make_tree_from_state(program.river, board_index, state.river);
+
+  auto update_terminal_values = [&](const StreetTree &street,
+                                    BoardIndex board,
+                                    StreetReachBuffers &reaches,
+                                    StreetValueBuffer &values) {
+    prepare_value_buffer(street, player, values);
+    size_t player_index = static_cast<size_t>(player);
+    size_t opponent_index = static_cast<size_t>(opponent(player));
+    size_t player_width =
+        street.compiled.padded_hand_counts[player_index];
+    size_t opponent_width =
+        street.compiled.padded_hand_counts[opponent_index];
+    terminals.evaluate_folds(
+        board, player,
+        fold_reaches(street, reaches, opponent(player)), opponent_width,
+        street.compiled.fold_payoffs, fold_values(street, values, player),
+        player_width);
+    if (street.compiled.street == Street::River) {
+      terminals.evaluate_showdowns(
+          board, player,
+          showdown_reaches(street, reaches, opponent(player)), opponent_width,
+          street.compiled.showdowns, showdown_values(street, values, player),
+          player_width);
+    } else {
+      terminals.evaluate_showdowns(
+          board, player,
+          showdown_reaches(street, reaches, opponent(player)), opponent_width,
+          street.compiled.showdowns, showdown_values(street, values, player),
+          player_width);
+    }
+  };
+
+  auto schedule_turn_groups = program.schedule.turn_groups;
+  if (program.flop.has_value() && program.turn.has_value()) {
+    assert(program.flop_transition_graph.has_value());
+    assert(program.turn_transition_graph.has_value());
+    const CompiledTransitionGraph &flop_to_turn =
+        *program.flop_transition_graph;
+    const CompiledTransitionGraph &turn_to_river =
+        *program.turn_transition_graph;
+
+    StreetReachBuffers flop_reaches;
+    propagate_reaches(flop_tree, 0, root_ranges, flop_reaches);
+    StreetValueBuffer flop_values;
+    prepare_value_buffer(flop_tree, player, flop_values);
+    update_terminal_values(flop_tree, 0, flop_reaches, flop_values);
+
+    size_t flop_player_index = static_cast<size_t>(player);
+    size_t flop_opponent_index = static_cast<size_t>(opponent(player));
+    size_t flop_player_width =
+        flop_tree.compiled.padded_hand_counts[flop_player_index];
+    size_t flop_opponent_width =
+        flop_tree.compiled.padded_hand_counts[flop_opponent_index];
+    std::span<const float> flop_player_boundary =
+        boundary_reaches(flop_tree, flop_reaches, player);
+    std::span<const float> flop_opponent_boundary =
+        boundary_reaches(flop_tree, flop_reaches, opponent(player));
+
+    for (const TurnGroup &turn_group : schedule_turn_groups) {
+      for (uint32_t turn_offset = 0; turn_offset < turn_group.parent_row_count;
+           ++turn_offset) {
+        BoardIndex turn_board = turn_group.parent_row_begin + turn_offset;
+        size_t turn_child_begin = flop_to_turn.child_offsets[turn_board];
+        size_t turn_child_end = flop_to_turn.child_offsets[turn_board + 1];
+        float turn_local_chance =
+            flop_to_turn.local_chance_weights[turn_child_begin];
+
+        StreetValueBuffer turn_values;
+        StreetReachBuffers turn_reaches;
+        std::array<std::span<const float>, 2> turn_roots{};
+
+        for (size_t endpoint = 0;
+             endpoint < flop_tree.compiled.boundary_value_count; ++endpoint) {
+          size_t boundary_index = endpoint * 1;
+          std::span<const float> player_boundary =
+              flop_player_boundary.subspan(boundary_index * flop_player_width,
+                                           flop_player_width);
+          std::span<const float> opponent_boundary =
+              flop_opponent_boundary.subspan(boundary_index *
+                                                 flop_opponent_width,
+                                             flop_opponent_width);
+
+          std::vector<float> masked_player_root(flop_player_width, 0.0F);
+          std::vector<float> masked_opponent_root(flop_opponent_width, 0.0F);
+          terminals.mask_board_reaches(turn_board, player, player_boundary,
+                                       masked_player_root);
+          terminals.mask_board_reaches(turn_board, opponent(player),
+                                       opponent_boundary,
+                                       masked_opponent_root);
+          turn_roots[player_index] = masked_player_root;
+          turn_roots[opponent_index] = masked_opponent_root;
+        }
+
+        propagate_reaches(turn_tree, turn_board, turn_roots, turn_reaches);
+        update_terminal_values(turn_tree, turn_board, turn_reaches, turn_values);
+
+        std::span<const float> turn_player_boundary =
+            boundary_reaches(turn_tree, turn_reaches, player);
+        std::span<const float> turn_opponent_boundary =
+            boundary_reaches(turn_tree, turn_reaches, opponent(player));
+
+        std::vector<float> river_root_values(
+            turn_tree.compiled.padded_hand_counts[player_index], 0.0F);
+
+        for (BoardIndex river_board = turn_child_begin;
+             river_board < turn_child_end; ++river_board) {
+          float river_local_chance =
+              turn_to_river.local_chance_weights[
+                  turn_to_river.child_offsets[river_board]];
+          float cumulative_chance =
+              turn_local_chance * river_local_chance;
+          std::array<std::span<const float>, 2> river_roots{};
+          std::vector<float> masked_player_root(
+              river_tree.compiled.padded_hand_counts[player_index], 0.0F);
+          std::vector<float> masked_opponent_root(
+              river_tree.compiled.padded_hand_counts[opponent_index], 0.0F);
+          for (size_t endpoint = 0;
+               endpoint < turn_tree.compiled.boundary_value_count; ++endpoint) {
+            std::span<const float> player_boundary =
+                turn_player_boundary.subspan(endpoint * flop_player_width,
+                                             flop_player_width);
+            std::span<const float> opponent_boundary =
+                turn_opponent_boundary.subspan(endpoint * flop_opponent_width,
+                                               flop_opponent_width);
+            terminals.mask_board_reaches(river_board, player, player_boundary,
+                                         masked_player_root);
+            terminals.mask_board_reaches(river_board, opponent(player),
+                                         opponent_boundary,
+                                         masked_opponent_root);
+          }
+          river_roots[player_index] = masked_player_root;
+          river_roots[opponent_index] = masked_opponent_root;
+
+          RiverUpdateBuffers river_buffers;
+          std::vector<float> child_root_values(
+              river_tree.compiled.padded_hand_counts[player_index], 0.0F);
+          update_river(river_tree, river_board, river_roots, player, terminals,
+                       river_buffers, child_root_values, cumulative_chance,
+                       iteration_weight);
+          for (size_t hand = 0; hand < child_root_values.size(); ++hand) {
+            river_root_values[hand] +=
+                river_local_chance * child_root_values[hand];
+          }
+        }
+
+        std::copy(river_root_values.begin(), river_root_values.end(),
+                  turn_values.workspace.begin() +
+                      static_cast<size_t>(turn_tree.compiled.boundary_value_begin) *
+                      turn_tree.compiled.padded_hand_counts[player_index]);
+
+        std::vector<float> turn_root_values(
+            turn_tree.compiled.padded_hand_counts[player_index], 0.0F);
+        ::spmv_poker::update_player(
+            turn_tree, turn_board, player, turn_reaches.workspaces[player_index],
+            turn_values, turn_root_values, turn_local_chance, iteration_weight);
+
+        for (size_t hand = 0; hand < turn_root_values.size(); ++hand) {
+          flop_values.workspace[flop_tree.compiled.boundary_value_begin *
+                                    flop_player_width +
+                                hand] +=
+              turn_local_chance * turn_root_values[hand];
+        }
+      }
+    }
+
+    std::vector<float> flop_root_values(
+        flop_tree.compiled.padded_hand_counts[player_index], 0.0F);
+    ::spmv_poker::update_player(flop_tree, 0, player,
+                                flop_reaches.workspaces[player_index],
+                                flop_values, flop_root_values, 1.0F,
+                                iteration_weight);
+    std::copy(flop_root_values.begin(), flop_root_values.end(),
+              root_values.begin());
+    store_tree_state(state.flop, flop_tree);
+    store_tree_state(state.turn, turn_tree);
+    store_tree_state(state.river, river_tree);
+    return;
+  }
+
+    std::copy(root_ranges[player_index].begin(), root_ranges[player_index].end(),
+            root_values.begin());
+  store_tree_state(state.river, river_tree);
 }
 
 } // namespace spmv_poker

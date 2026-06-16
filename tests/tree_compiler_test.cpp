@@ -1,3 +1,4 @@
+#include "spmv_poker/spmv_evaluator.h"
 #include "spmv_poker/tree_compiler.h"
 
 #include <array>
@@ -117,12 +118,106 @@ void test_player_specific_forward_plans() {
         "villain action resolves villain child to retained storage");
 }
 
+void test_transition_graph_and_schedule() {
+  RunoutIndex boards(make_mask(std::array<uint8_t, 3>{2, 5, 8}));
+  CompiledTransitionGraph graph =
+      compile_transition_graph(boards, Street::Turn);
+
+  size_t parent_count = boards.board_count(Street::Turn);
+  size_t child_per_parent = boards.child_count(Street::Turn);
+  check(graph.parent_street == Street::Turn, "parent street is preserved");
+  check(graph.child_street == Street::River, "child street is derived");
+  check(graph.child_offsets.size() == parent_count + 1,
+        "transition graph stores one offset per parent board");
+  check(graph.child_boards.size() == parent_count * child_per_parent,
+        "transition graph stores every legal child exactly once");
+  check(graph.local_chance_weights.size() == graph.child_boards.size(),
+        "transition graph stores one local weight per edge");
+  check(graph.child_offsets.back() == graph.child_boards.size(),
+        "transition offsets terminate at the edge count");
+  check(graph.local_chance_weights.front() ==
+            1.0F / static_cast<float>(child_per_parent),
+        "transition graph preserves uniform chance weights");
+
+  ExecutionSchedule schedule =
+      build_execution_schedule(boards, Street::Turn, 11, 96);
+  size_t total_turn_rows = 0;
+  for (size_t group = 0; group < schedule.turn_groups.size(); ++group) {
+    const TurnGroup &turn_group = schedule.turn_groups[group];
+    check(turn_group.parent_row_count <= schedule.turn_row_capacity,
+          "turn groups fit their capacity");
+    check(turn_group.child_row_count ==
+              turn_group.parent_row_count * child_per_parent,
+          "turn group child count is derived from the parent count");
+    total_turn_rows += turn_group.parent_row_count;
+
+    const std::span<const RiverGroup> river_groups =
+        schedule.river_groups_for(group);
+    size_t total_river_rows = 0;
+    for (const RiverGroup &river_group : river_groups) {
+      check(river_group.child_row_count <= schedule.river_row_capacity,
+            "river groups fit their capacity");
+      check(river_group.child_row_count ==
+                river_group.parent_row_count * child_per_parent,
+            "river group child count is derived from the parent count");
+      total_river_rows += river_group.parent_row_count;
+    }
+    check(total_river_rows == turn_group.parent_row_count,
+          "river groups cover the full turn group");
+  }
+  check(total_turn_rows == parent_count, "turn groups cover all parents");
+}
+
+void test_bounded_workspace_sizes() {
+  StreetTopology topology = make_topology();
+  CompiledStreet compiled = compile_street(topology);
+
+  CpuStreetWorkspace street_workspace;
+  street_workspace.prepare(compiled, 7);
+  check(street_workspace.row_capacity == 7,
+        "street workspace records its row capacity");
+  check(street_workspace.reaches[0].size() ==
+            compiled.forward_plans[0].workspace_slot_count * 7 *
+                compiled.padded_hand_counts[0],
+        "street reach workspace is capacity bounded");
+  check(street_workspace.values[1].size() ==
+            compiled.value_workspace_slot_count * 7 *
+                compiled.padded_hand_counts[1],
+        "street value workspace is capacity bounded");
+
+  CpuTransitionWorkspace transition_workspace;
+  transition_workspace.prepare(3, 7, 11, compiled);
+  check(transition_workspace.endpoint_capacity == 3,
+        "transition workspace records endpoint capacity");
+  check(transition_workspace.parent_row_capacity == 7,
+        "transition workspace records parent capacity");
+  check(transition_workspace.child_row_capacity == 11,
+        "transition workspace records child capacity");
+  check(transition_workspace.child_boards.size() == 11,
+        "transition workspace bounds child boards");
+  check(transition_workspace.child_root_reaches[0].size() ==
+            3 * 11 * compiled.padded_hand_counts[0],
+        "transition child reaches are capacity bounded");
+
+  CpuBoundaryValueAccumulator accumulator;
+  accumulator.prepare(3, 7, compiled);
+  check(accumulator.endpoint_capacity == 3,
+        "boundary accumulator records endpoint capacity");
+  check(accumulator.parent_row_capacity == 7,
+        "boundary accumulator records parent capacity");
+  check(accumulator.values[1].size() ==
+            3 * 7 * compiled.padded_hand_counts[1],
+        "boundary accumulator is capacity bounded");
+}
+
 } // namespace
 
 int main() {
   try {
     test_backward_plan();
     test_player_specific_forward_plans();
+    test_transition_graph_and_schedule();
+    test_bounded_workspace_sizes();
   } catch (const std::exception &error) {
     std::cerr << "Test failure: " << error.what() << '\n';
     return EXIT_FAILURE;

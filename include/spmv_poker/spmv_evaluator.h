@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cassert>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -102,6 +103,207 @@ struct BatchBuffers {
   std::vector<float> values;
 };
 
+struct ExecutionCapacities {
+  size_t flop_rows = 0;
+  size_t turn_rows = 0;
+  size_t river_rows = 0;
+  size_t flop_to_turn_transition_rows = 0;
+  size_t turn_to_river_transition_rows = 0;
+};
+
+using RootRangesView = std::array<std::span<const float>, 2>;
+
+struct RiverTerminalOperator;
+
+struct CpuBoundaryValueAccumulator {
+  std::array<std::vector<float>, 2> values;
+  size_t endpoint_capacity = 0;
+  size_t parent_row_capacity = 0;
+
+  void prepare(size_t endpoint_count, size_t parent_row_count,
+               const CompiledStreet &compiled) {
+    endpoint_capacity = endpoint_count;
+    parent_row_capacity = parent_row_count;
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[index];
+      values[index].resize(endpoint_capacity * parent_row_capacity * width);
+    }
+  }
+};
+
+struct CpuTransitionWorkspace {
+  std::array<std::vector<float>, 2> child_root_reaches;
+  std::array<std::vector<float>, 2> child_root_values;
+  std::vector<BoardIndex> child_boards;
+  std::vector<uint32_t> parent_row_for_child;
+  std::vector<float> local_chance_weights;
+  std::vector<float> child_cumulative_chance_reaches;
+  size_t endpoint_capacity = 0;
+  size_t parent_row_capacity = 0;
+  size_t child_row_capacity = 0;
+
+  void prepare(size_t endpoint_count, size_t parent_row_count,
+               size_t child_row_count, const CompiledStreet &child_compiled) {
+    endpoint_capacity = endpoint_count;
+    parent_row_capacity = parent_row_count;
+    child_row_capacity = child_row_count;
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t index = static_cast<size_t>(player);
+      size_t width = child_compiled.padded_hand_counts[index];
+      child_root_reaches[index].resize(endpoint_capacity * child_row_capacity *
+                                       width);
+      child_root_values[index].resize(endpoint_capacity * child_row_capacity *
+                                      width);
+    }
+    child_boards.resize(child_row_capacity);
+    parent_row_for_child.resize(child_row_capacity);
+    local_chance_weights.resize(child_row_capacity);
+    child_cumulative_chance_reaches.resize(child_row_capacity);
+  }
+};
+
+struct CpuStreetWorkspace {
+  std::array<std::vector<float>, 2> reaches;
+  std::array<std::vector<float>, 2> values;
+  size_t row_capacity = 0;
+
+  void prepare(const CompiledStreet &compiled, size_t requested_row_capacity) {
+    row_capacity = requested_row_capacity;
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[index];
+      size_t reach_slots = compiled.forward_plans[index].workspace_slot_count;
+      reaches[index].resize(reach_slots * row_capacity * width);
+      values[index].resize(compiled.value_workspace_slot_count * row_capacity *
+                           width);
+    }
+  }
+};
+
+struct SolveProgram {
+  std::optional<RunoutIndex> board_index;
+  std::optional<CompiledStreet> flop;
+  std::optional<CompiledStreet> turn;
+  CompiledStreet river;
+  std::optional<CompiledTransitionGraph> flop_transition_graph;
+  std::optional<CompiledTransitionGraph> turn_transition_graph;
+  ExecutionSchedule schedule;
+  const RiverTerminalOperator *terminals = nullptr;
+};
+
+struct StreetState {
+  std::vector<float> regrets;
+  std::vector<float> cumulative_strategy;
+};
+
+struct SolveState {
+  std::optional<StreetState> flop;
+  std::optional<StreetState> turn;
+  StreetState river;
+};
+
+struct CpuSolveWorkspace {
+  std::optional<CpuStreetWorkspace> flop;
+  std::optional<CpuStreetWorkspace> turn;
+  CpuStreetWorkspace river;
+  std::optional<CpuTransitionWorkspace> flop_to_turn;
+  std::optional<CpuTransitionWorkspace> turn_to_river;
+  std::optional<CpuBoundaryValueAccumulator> flop_boundary_values;
+  std::optional<CpuBoundaryValueAccumulator> turn_boundary_values;
+  CpuSolveWorkspace() = default;
+};
+
+class CpuSolveExecutor {
+public:
+  void update_player(const SolveProgram &program, SolveState &state,
+                     CpuSolveWorkspace &workspace, Player player,
+                     RootRangesView root_ranges, std::span<float> root_values,
+                     float iteration_weight);
+};
+
+template <typename T>
+class BoardHandView {
+public:
+  BoardHandView(std::span<T> storage, size_t board_count, size_t hand_stride)
+      : storage_(storage), board_count_(board_count),
+        hand_stride_(hand_stride) {
+    assert(storage_.size() >= board_count_ * hand_stride_);
+  }
+
+  [[nodiscard]] T &operator()(size_t board, size_t hand) const {
+    assert(board < board_count_);
+    assert(hand < hand_stride_);
+    return storage_[board * hand_stride_ + hand];
+  }
+
+  [[nodiscard]] std::span<T> hands(size_t board) const {
+    assert(board < board_count_);
+    return storage_.subspan(board * hand_stride_, hand_stride_);
+  }
+
+  [[nodiscard]] size_t board_count() const { return board_count_; }
+  [[nodiscard]] size_t hand_stride() const { return hand_stride_; }
+
+private:
+  std::span<T> storage_;
+  size_t board_count_;
+  size_t hand_stride_;
+};
+
+template <typename T>
+class SlotBoardHandView {
+public:
+  SlotBoardHandView(std::span<T> storage, size_t slot_count, size_t board_count,
+                    size_t hand_stride)
+      : storage_(storage), slot_count_(slot_count), board_count_(board_count),
+        hand_stride_(hand_stride) {
+    assert(storage_.size() >= slot_count_ * board_count_ * hand_stride_);
+  }
+
+  [[nodiscard]] T &operator()(size_t slot, size_t board, size_t hand) const {
+    assert(slot < slot_count_);
+    assert(board < board_count_);
+    assert(hand < hand_stride_);
+    return storage_[((slot * board_count_) + board) * hand_stride_ + hand];
+  }
+
+  [[nodiscard]] std::span<T> hands(size_t slot, size_t board) const {
+    assert(slot < slot_count_);
+    assert(board < board_count_);
+    const size_t offset = ((slot * board_count_) + board) * hand_stride_;
+    return storage_.subspan(offset, hand_stride_);
+  }
+
+  [[nodiscard]] size_t slot_count() const { return slot_count_; }
+  [[nodiscard]] size_t board_count() const { return board_count_; }
+  [[nodiscard]] size_t hand_stride() const { return hand_stride_; }
+
+private:
+  std::span<T> storage_;
+  size_t slot_count_;
+  size_t board_count_;
+  size_t hand_stride_;
+};
+
+struct StreetBatchView {
+  std::span<const BoardIndex> boards;
+  std::array<std::span<const float>, 2> root_reaches;
+  std::span<float> root_values;
+  std::span<const float> cumulative_chance_reaches;
+
+  [[nodiscard]] size_t board_count() const { return boards.size(); }
+};
+
+struct OwnedStreetBatch {
+  std::vector<BoardIndex> boards;
+  std::array<std::vector<float>, 2> root_reaches;
+  std::vector<float> root_values;
+  std::vector<float> cumulative_chance_reaches;
+
+  [[nodiscard]] StreetBatchView view();
+};
+
 struct BatchContext;
 
 struct RiverTerminalOperator {
@@ -150,6 +352,17 @@ void propagate_reaches(
     const StreetTree &game, BoardIndex board,
     const std::array<std::span<const float>, 2> &root_reaches,
     StreetReachBuffers &outputs);
+
+void validate_batch(const StreetBatchView &batch, const CompiledStreet &compiled,
+                    Player evaluated_player);
+
+[[nodiscard]] OwnedStreetBatch
+flatten_jobs(std::span<const BatchJob> jobs, const CompiledStreet &compiled,
+             Player evaluated_player);
+
+void propagate_reaches_batch(
+    const StreetTree &game, const StreetBatchView &batch,
+    std::array<std::span<float>, 2> reach_workspaces);
 
 void update_player(StreetTree &game, BoardIndex board, Player player,
                    std::span<const float> reach_workspace,

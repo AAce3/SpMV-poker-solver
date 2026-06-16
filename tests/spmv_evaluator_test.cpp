@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -292,6 +293,163 @@ void test_complete_forward_street_traversal() {
              "villain reach follows villain's fold strategy");
   check_near(villain_showdowns[test.second_showdown * width], 4.0F,
              "villain reach passes unchanged through hero's direct action");
+}
+
+void compare_batched_forward_against_single_board(
+    const TestGame &test, std::span<const BoardIndex> boards,
+    std::span<const std::array<std::vector<float>, 2>> root_sets,
+    std::span<const std::vector<float>> batched_workspaces) {
+  const CompiledStreet &compiled = test.game.compiled;
+  check(root_sets.size() == boards.size(),
+        "batched forward test provides one root set per board");
+  for (size_t board = 0; board < boards.size(); ++board) {
+    StreetReachBuffers expected;
+    std::array<std::span<const float>, 2> roots{root_sets[board][0],
+                                                root_sets[board][1]};
+    propagate_reaches(test.game, boards[board], roots, expected);
+
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t player_index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[player_index];
+      size_t slot_count =
+          compiled.forward_plans[player_index].workspace_slot_count;
+      const std::vector<float> &batched = batched_workspaces[player_index];
+      for (size_t slot = 0; slot < slot_count; ++slot) {
+        auto actual = std::span<const float>(batched)
+                          .subspan((slot * boards.size() + board) * width,
+                                   width);
+        auto expected_slot =
+            std::span<const float>(expected.workspaces[player_index])
+                .subspan(slot * width, width);
+        for (size_t hand = 0; hand < width; ++hand) {
+          check_near(actual[hand], expected_slot[hand],
+                     "batched forward matches single-board propagation");
+        }
+      }
+    }
+  }
+}
+
+void test_direct_batched_forward_matches_single_board_and_board_order() {
+  TestGame test = make_game();
+  set_regrets(test);
+  const CompiledStreet &compiled = test.game.compiled;
+
+  std::array<BoardIndex, 3> ordered_boards{0, 17, 42};
+  std::array<BoardIndex, 3> shuffled_boards{42, 0, 17};
+
+  std::array<std::array<std::vector<float>, 2>, 3> ordered_roots;
+  std::array<std::array<std::vector<float>, 2>, 3> shuffled_roots;
+
+  for (size_t board = 0; board < ordered_boards.size(); ++board) {
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t player_index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[player_index];
+      ordered_roots[board][player_index].resize(width, 0.0F);
+      shuffled_roots[board][player_index].resize(width, 0.0F);
+      for (size_t hand = 0; hand < test.game.compiled.hand_counts[player_index];
+           ++hand) {
+        ordered_roots[board][player_index][hand] =
+            static_cast<float>(((board + 2) * (player_index + 3) *
+                                (hand + 5)) % 37) /
+            37.0F;
+        shuffled_roots[board][player_index][hand] =
+            static_cast<float>(((board + 7) * (player_index + 11) *
+                                (hand + 13)) % 41) /
+            41.0F;
+      }
+    }
+  }
+
+  std::array<std::vector<float>, 2> ordered_flat_roots{
+      std::vector<float>(ordered_boards.size() *
+                         compiled.padded_hand_counts[0]),
+      std::vector<float>(ordered_boards.size() *
+                         compiled.padded_hand_counts[1])};
+  std::array<std::vector<float>, 2> shuffled_flat_roots{
+      std::vector<float>(shuffled_boards.size() *
+                         compiled.padded_hand_counts[0]),
+      std::vector<float>(shuffled_boards.size() *
+                         compiled.padded_hand_counts[1])};
+
+  for (size_t board = 0; board < ordered_boards.size(); ++board) {
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t player_index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[player_index];
+      auto destination = std::span<float>(ordered_flat_roots[player_index])
+                             .subspan(board * width, width);
+      std::ranges::copy(ordered_roots[board][player_index], destination.begin());
+    }
+  }
+  for (size_t board = 0; board < shuffled_boards.size(); ++board) {
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t player_index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[player_index];
+      auto destination = std::span<float>(shuffled_flat_roots[player_index])
+                             .subspan(board * width, width);
+      std::ranges::copy(shuffled_roots[board][player_index],
+                        destination.begin());
+    }
+  }
+
+  auto make_batched = [&](std::span<const BoardIndex> boards,
+                          const std::array<std::vector<float>, 2> &flat_roots,
+                          std::array<std::vector<float>, 2> &workspaces,
+                          std::vector<float> &cumulative_reaches) {
+    size_t board_count = boards.size();
+    std::array<std::span<float>, 2> output_spans{
+        workspaces[0], workspaces[1]};
+    cumulative_reaches.assign(board_count, 1.0F);
+    StreetBatchView batch{
+        .boards = boards,
+        .root_reaches = {std::span<const float>(flat_roots[0]),
+                         std::span<const float>(flat_roots[1])},
+        .root_values = {},
+        .cumulative_chance_reaches = cumulative_reaches,
+    };
+    propagate_reaches_batch(test.game, batch, output_spans);
+  };
+
+  std::array<std::vector<float>, 2> ordered_workspace_storage{
+      std::vector<float>(compiled.forward_plans[0].workspace_slot_count *
+                         ordered_boards.size() *
+                         compiled.padded_hand_counts[0]),
+      std::vector<float>(compiled.forward_plans[1].workspace_slot_count *
+                         ordered_boards.size() *
+                         compiled.padded_hand_counts[1])};
+  std::vector<float> ordered_cumulative_reaches;
+  make_batched(ordered_boards, ordered_flat_roots, ordered_workspace_storage,
+               ordered_cumulative_reaches);
+  compare_batched_forward_against_single_board(
+      test, ordered_boards, ordered_roots, ordered_workspace_storage);
+
+  std::array<std::vector<float>, 2> shuffled_workspace_storage{
+      std::vector<float>(compiled.forward_plans[0].workspace_slot_count *
+                         shuffled_boards.size() *
+                         compiled.padded_hand_counts[0]),
+      std::vector<float>(compiled.forward_plans[1].workspace_slot_count *
+                         shuffled_boards.size() *
+                         compiled.padded_hand_counts[1])};
+  std::vector<float> shuffled_cumulative_reaches;
+  std::array<std::array<std::vector<float>, 2>, 3> shuffled_expected;
+  for (size_t index = 0; index < shuffled_boards.size(); ++index) {
+    for (Player player : {Player::Hero, Player::Villain}) {
+      size_t player_index = static_cast<size_t>(player);
+      size_t width = compiled.padded_hand_counts[player_index];
+      shuffled_expected[index][player_index].resize(width, 0.0F);
+      for (size_t hand = 0; hand < test.game.compiled.hand_counts[player_index];
+           ++hand) {
+        shuffled_expected[index][player_index][hand] =
+            static_cast<float>(((index + 11) * (player_index + 5) *
+                                (hand + 7)) % 43) /
+            43.0F;
+      }
+    }
+  }
+  make_batched(shuffled_boards, shuffled_flat_roots, shuffled_workspace_storage,
+               shuffled_cumulative_reaches);
+  compare_batched_forward_against_single_board(
+      test, shuffled_boards, shuffled_expected, shuffled_workspace_storage);
 }
 
 void test_complete_backward_street_update() {
