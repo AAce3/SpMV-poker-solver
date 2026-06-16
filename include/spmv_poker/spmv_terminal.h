@@ -82,7 +82,6 @@ private:
 
   const TerminalTables &tables_;
   std::vector<CompiledTerminalPlan> terminal_plans_;
-  std::array<std::vector<uint16_t>, 2> rank_groups_by_board_hand_;
   std::array<std::vector<int32_t>, 2> matching_opponent_hands_;
   size_t max_rank_group_count_ = 0;
   mutable std::vector<float> showdown_summary_scratch_;

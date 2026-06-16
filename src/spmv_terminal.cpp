@@ -114,24 +114,6 @@ RankSummaryTerminalOperator::RankSummaryTerminalOperator(
 
     BoardMetadata metadata;
     metadata.rank_group_count = static_cast<uint16_t>(merged_ranks.size());
-    for (Player player : {Player::Hero, Player::Villain}) {
-      size_t player_index = static_cast<size_t>(player);
-      auto &all_groups = rank_groups_by_board_hand_[player_index];
-      size_t group_begin = all_groups.size();
-      all_groups.resize(group_begin + ranks[player_index].size(),
-                        INVALID_RANK_GROUP);
-      for (size_t hand = 0; hand < ranks[player_index].size(); ++hand) {
-        uint16_t rank = ranks[static_cast<size_t>(player)][hand];
-        if (rank != 0) {
-          all_groups[group_begin + hand] = static_cast<uint16_t>(
-              std::lower_bound(merged_ranks.begin(), merged_ranks.end(), rank,
-                               std::greater<>()) -
-              merged_ranks.begin());
-        }
-      }
-      metadata.player_rank_groups[player_index] =
-          IndexRange{group_begin, ranks[player_index].size()};
-    }
     metadata_by_runout[runout] = metadata;
     max_rank_group_count_ =
         std::max(max_rank_group_count_,
@@ -290,10 +272,16 @@ void RankSummaryTerminalOperator::evaluate_showdowns_lane_major(
   auto opponent_hands = tables_.hands(opponent(evaluated_player));
   size_t evaluated_index = static_cast<size_t>(evaluated_player);
   size_t opponent_index = static_cast<size_t>(opponent(evaluated_player));
-  auto evaluated_groups = metadata.player_rank_groups[evaluated_index].view(
-      rank_groups_by_board_hand_[evaluated_index]);
-  auto opponent_groups = metadata.player_rank_groups[opponent_index].view(
-      rank_groups_by_board_hand_[opponent_index]);
+  const RankedHandTable &evaluated_ranked = tables_.ranked[evaluated_index];
+  const RankedHandTable &opponent_ranked = tables_.ranked[opponent_index];
+  IndexRange evaluated_hand_range =
+      evaluated_ranked.runout_hand_ranges[plan.runout_index];
+  IndexRange evaluated_group_range =
+      evaluated_ranked.runout_group_ranges[plan.runout_index];
+  IndexRange opponent_hand_range =
+      opponent_ranked.runout_hand_ranges[plan.runout_index];
+  IndexRange opponent_group_range =
+      opponent_ranked.runout_group_ranges[plan.runout_index];
   assert(showdowns.size() == terminal_count);
   assert(lane_major_opponent_reaches.size() ==
          showdowns.size() * opponent_hands.size());
@@ -303,85 +291,106 @@ void RankSummaryTerminalOperator::evaluate_showdowns_lane_major(
     return;
   }
 
-  std::vector<float> prefix(SUMMARY_CHANNEL_COUNT * group_count * terminal_count,
-                            0.0F);
+  Tile total{};
+  std::array<Tile, DECK_SIZE> card_totals{};
 
-  // Stage 1: scatter opponent reaches into global and blocker rank summaries.
-  for (size_t hand_index = 0; hand_index < opponent_hands.size();
-       ++hand_index) {
-    uint16_t group = opponent_groups[hand_index];
-    if (group == INVALID_RANK_GROUP) {
-      continue;
+  size_t opponent_group = opponent_group_range.begin + opponent_group_range.count;
+  for (size_t evaluated_offset = evaluated_group_range.count; evaluated_offset-- > 0;) {
+    const RankGroup &group =
+        evaluated_ranked.groups[evaluated_group_range.begin + evaluated_offset];
+    while (opponent_group > opponent_group_range.begin &&
+           opponent_ranked.groups[opponent_group - 1].rank > group.rank) {
+      --opponent_group;
+      uint16_t begin =
+          opponent_group == opponent_group_range.begin
+              ? 0
+              : opponent_ranked.groups[opponent_group - 1].end;
+      uint16_t end = opponent_ranked.groups[opponent_group].end;
+      for (uint16_t offset = begin; offset < end; ++offset) {
+        uint16_t hand_index =
+            opponent_ranked.hand_indices[opponent_hand_range.begin + offset];
+        const Hand &hand = opponent_hands[hand_index];
+        const float *hand_reaches =
+            lane_major_opponent_reaches.data() + hand_index * terminal_count;
+        for (size_t lane = 0; lane < terminal_count; ++lane) {
+          float reach = hand_reaches[lane];
+          total[lane] += reach;
+          card_totals[hand.first][lane] += reach;
+          card_totals[hand.second][lane] += reach;
+        }
+      }
     }
-    const Hand &hand = opponent_hands[hand_index];
-    const float *hand_reaches =
-        lane_major_opponent_reaches.data() + hand_index * terminal_count;
-    for (size_t lane = 0; lane < terminal_count; ++lane) {
-      float reach = hand_reaches[lane];
-      prefix[lane_major_summary_index(GLOBAL_CHANNEL, group, lane, group_count,
-                                      terminal_count)] += reach;
-      prefix[lane_major_summary_index(hand.first, group, lane, group_count,
-                                      terminal_count)] += reach;
-      prefix[lane_major_summary_index(hand.second, group, lane, group_count,
-                                      terminal_count)] += reach;
-    }
-  }
 
-  // Stage 2: independently prefix-scan every global/card summary channel.
-  for (size_t channel = 0; channel < SUMMARY_CHANNEL_COUNT; ++channel) {
-    for (size_t lane = 0; lane < terminal_count; ++lane) {
-      float running = 0.0F;
-      for (size_t group = 0; group < group_count; ++group) {
-        size_t index = lane_major_summary_index(channel, group, lane,
-                                                group_count, terminal_count);
-        running += prefix[index];
-        prefix[index] = running;
+    uint16_t begin =
+        evaluated_offset == 0
+            ? 0
+            : evaluated_ranked
+                  .groups[evaluated_group_range.begin + evaluated_offset - 1]
+                  .end;
+    for (uint16_t offset = begin; offset < group.end; ++offset) {
+      uint16_t hand_index =
+          evaluated_ranked.hand_indices[evaluated_hand_range.begin + offset];
+      const Hand &hand = evaluated_hands[hand_index];
+      float *values = lane_major_values.data() + hand_index * terminal_count;
+      for (size_t lane = 0; lane < terminal_count; ++lane) {
+        float compatible =
+            total[lane] - card_totals[hand.first][lane] -
+            card_totals[hand.second][lane];
+        values[lane] = showdowns[lane].win_payoff * compatible;
       }
     }
   }
 
-  // Stage 3: independently produce each evaluated-hand value.
-  for (size_t hand_index = 0; hand_index < evaluated_hands.size();
-       ++hand_index) {
-    uint16_t group = evaluated_groups[hand_index];
-    if (group == INVALID_RANK_GROUP) {
-      continue;
+  total.fill(0.0F);
+  for (auto &card_total : card_totals) {
+    card_total.fill(0.0F);
+  }
+  opponent_group = opponent_group_range.begin;
+  for (size_t evaluated_offset = 0;
+       evaluated_offset < evaluated_group_range.count; ++evaluated_offset) {
+    const RankGroup &group =
+        evaluated_ranked.groups[evaluated_group_range.begin + evaluated_offset];
+    while (opponent_group <
+               opponent_group_range.begin + opponent_group_range.count &&
+           opponent_ranked.groups[opponent_group].rank < group.rank) {
+      uint16_t begin =
+          opponent_group == opponent_group_range.begin
+              ? 0
+              : opponent_ranked.groups[opponent_group - 1].end;
+      uint16_t end = opponent_ranked.groups[opponent_group].end;
+      for (uint16_t offset = begin; offset < end; ++offset) {
+        uint16_t hand_index =
+            opponent_ranked.hand_indices[opponent_hand_range.begin + offset];
+        const Hand &hand = opponent_hands[hand_index];
+        const float *hand_reaches =
+            lane_major_opponent_reaches.data() + hand_index * terminal_count;
+        for (size_t lane = 0; lane < terminal_count; ++lane) {
+          float reach = hand_reaches[lane];
+          total[lane] += reach;
+          card_totals[hand.first][lane] += reach;
+          card_totals[hand.second][lane] += reach;
+        }
+      }
+      ++opponent_group;
     }
-    const Hand &hand = evaluated_hands[hand_index];
-    float *hand_values = lane_major_values.data() + hand_index * terminal_count;
-    for (size_t lane = 0; lane < terminal_count; ++lane) {
-      float global_total =
-          lane_major_prefix_at(prefix, GLOBAL_CHANNEL, group_count - 1, lane,
-                               group_count, terminal_count);
-      float global_through = lane_major_prefix_at(prefix, GLOBAL_CHANNEL, group,
-                                                  lane, group_count,
-                                                  terminal_count);
-      float global_weaker =
-          group == 0 ? 0.0F
-                     : lane_major_prefix_at(prefix, GLOBAL_CHANNEL, group - 1,
-                                            lane, group_count, terminal_count);
 
-      auto blocked = [&](size_t card, size_t blocked_group) {
-        return lane_major_prefix_at(prefix, card, blocked_group, lane,
-                                    group_count, terminal_count);
-      };
-      float blocked_weaker =
-          group == 0 ? 0.0F
-                     : blocked(hand.first, group - 1) +
-                           blocked(hand.second, group - 1);
-      float blocked_stronger =
-          (lane_major_prefix_at(prefix, hand.first, group_count - 1, lane,
-                                group_count, terminal_count) -
-           blocked(hand.first, group)) +
-          (lane_major_prefix_at(prefix, hand.second, group_count - 1, lane,
-                                group_count, terminal_count) -
-           blocked(hand.second, group));
-
-      float weaker = global_weaker - blocked_weaker;
-      float stronger = global_total - global_through - blocked_stronger;
-      const CompiledShowdown &showdown = showdowns[lane];
-      hand_values[lane] =
-          showdown.win_payoff * weaker + showdown.loss_payoff * stronger;
+    uint16_t begin =
+        evaluated_offset == 0
+            ? 0
+            : evaluated_ranked
+                  .groups[evaluated_group_range.begin + evaluated_offset - 1]
+                  .end;
+    for (uint16_t offset = begin; offset < group.end; ++offset) {
+      uint16_t hand_index =
+          evaluated_ranked.hand_indices[evaluated_hand_range.begin + offset];
+      const Hand &hand = evaluated_hands[hand_index];
+      float *values = lane_major_values.data() + hand_index * terminal_count;
+      for (size_t lane = 0; lane < terminal_count; ++lane) {
+        float compatible =
+            total[lane] - card_totals[hand.first][lane] -
+            card_totals[hand.second][lane];
+        values[lane] += showdowns[lane].loss_payoff * compatible;
+      }
     }
   }
 }
