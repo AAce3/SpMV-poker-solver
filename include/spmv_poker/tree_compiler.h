@@ -106,20 +106,20 @@ struct CompiledTransitionGraph {
 };
 
 struct TurnGroup {
-  uint32_t parent_row_begin = 0;
-  uint32_t parent_row_count = 0;
-  uint32_t child_row_count = 0;
+  uint32_t parent_board_begin = 0;
+  uint32_t parent_board_count = 0;
+  uint32_t child_board_count = 0;
 };
 
 struct RiverGroup {
-  uint32_t parent_row_begin = 0;
-  uint32_t parent_row_count = 0;
-  uint32_t child_row_count = 0;
+  uint32_t local_parent_board_begin = 0;
+  uint32_t parent_board_count = 0;
+  uint32_t child_board_count = 0;
 };
 
 struct ExecutionSchedule {
-  size_t turn_row_capacity = 0;
-  size_t river_row_capacity = 0;
+  size_t turn_board_capacity = 0;
+  size_t river_board_capacity = 0;
   std::vector<TurnGroup> turn_groups;
   std::vector<std::vector<RiverGroup>> river_groups_by_turn_group;
 
@@ -140,7 +140,8 @@ static_assert(std::is_trivially_copyable_v<CompiledShowdown>);
 compile_transition_graph(const RunoutIndex &board_index, Street parent_street);
 [[nodiscard]] ExecutionSchedule
 build_execution_schedule(const RunoutIndex &board_index, Street starting_street,
-                         size_t turn_row_capacity, size_t river_row_capacity);
+                         size_t turn_board_capacity,
+                         size_t river_board_capacity);
 
 struct StreetTree {
   const CompiledStreet compiled;

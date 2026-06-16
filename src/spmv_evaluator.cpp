@@ -105,46 +105,6 @@ void validate_batch(const StreetBatchView &batch, const CompiledStreet &compiled
          batch.cumulative_chance_reaches.size() == board_count);
 }
 
-OwnedStreetBatch flatten_jobs(std::span<const BatchJob> jobs,
-                              const CompiledStreet &compiled,
-                              Player evaluated_player) {
-  OwnedStreetBatch batch;
-  size_t board_count = jobs.size();
-  batch.boards.resize(board_count);
-  batch.cumulative_chance_reaches.resize(board_count);
-
-  for (Player player : {Player::Hero, Player::Villain}) {
-    size_t player_index = static_cast<size_t>(player);
-    size_t width = compiled.padded_hand_counts[player_index];
-    batch.root_reaches[player_index].resize(board_count * width);
-  }
-
-  size_t evaluated_index = static_cast<size_t>(evaluated_player);
-  size_t evaluated_width = compiled.padded_hand_counts[evaluated_index];
-  batch.root_values.resize(board_count * evaluated_width);
-
-  for (size_t board = 0; board < board_count; ++board) {
-    batch.boards[board] = jobs[board].board;
-    batch.cumulative_chance_reaches[board] = jobs[board].chance_reach;
-
-    for (Player player : {Player::Hero, Player::Villain}) {
-      size_t player_index = static_cast<size_t>(player);
-      size_t width = compiled.padded_hand_counts[player_index];
-      auto destination = std::span<float>(batch.root_reaches[player_index])
-                             .subspan(board * width, width);
-      std::ranges::copy(jobs[board].root_reaches[player_index],
-                        destination.begin());
-    }
-
-    auto root_values = std::span<float>(batch.root_values)
-                           .subspan(board * evaluated_width, evaluated_width);
-    std::ranges::copy(jobs[board].root_values, root_values.begin());
-  }
-
-  validate_batch(batch.view(), compiled, evaluated_player);
-  return batch;
-}
-
 void propagate_reaches_batch(const StreetTree &game,
                              const StreetBatchView &batch,
                              std::array<std::span<float>, 2> reach_workspaces) {
@@ -598,80 +558,6 @@ void RiverTerminalOperator::evaluate_showdown_board_batch(
   }
 }
 
-void update_batch(StreetTree &river, std::span<const BatchJob> jobs,
-                  Player player, const RiverTerminalOperator &terminals,
-                  BatchContext &context, float iteration_weight) {
-  const CompiledStreet &compiled = river.compiled;
-  assert(compiled.street == Street::River);
-  assert(compiled.boundary_value_count == 0);
-  update_street_chain<Street::River, Street::River>(
-      river, {}, jobs, player, terminals, context, iteration_weight, 0);
-}
-
-void update_turn(StreetTree &turn, std::span<StreetTree> future_street_trees,
-                 std::span<const BatchJob> jobs, Player player,
-                 const RiverTerminalOperator &terminals, BatchContext &context,
-                 float iteration_weight, size_t boundary_batch_size) {
-  const CompiledStreet &compiled = turn.compiled;
-  assert(compiled.street == Street::Turn);
-  update_street_chain<Street::Turn, Street::Turn>(
-      turn, future_street_trees, jobs, player, terminals, context,
-      iteration_weight, boundary_batch_size);
-}
-
-void update_chance_root(StreetTree &river, std::span<const BatchJob> jobs,
-                        Player player, const RiverTerminalOperator &terminals,
-                        BatchContext &context, std::span<float> root_values,
-                        float iteration_weight) {
-  assert(!jobs.empty());
-  const CompiledStreet &compiled = river.compiled;
-  size_t player_index = static_cast<size_t>(player);
-  size_t opponent_index = static_cast<size_t>(opponent(player));
-  size_t player_width = compiled.padded_hand_counts[player_index];
-  assert(root_values.size() == player_width);
-
-  auto &frame = context.frames[0];
-  frame.child_jobs.resize(jobs.size());
-  frame.player_root_masks.reserve(jobs.size() * player_width);
-  frame.player_root_masks.resize(jobs.size() * player_width);
-  frame.opponent_root_masks.reserve(
-      jobs.size() * compiled.padded_hand_counts[opponent_index]);
-  frame.opponent_root_masks.resize(
-      jobs.size() * compiled.padded_hand_counts[opponent_index]);
-  for (size_t board = 0; board < jobs.size(); ++board) {
-    BatchJob &masked_job = frame.child_jobs[board];
-    masked_job.board = jobs[board].board;
-    masked_job.root_values = jobs[board].root_values;
-    masked_job.chance_reach = jobs[board].chance_reach;
-
-    std::span<float> player_masked =
-        std::span<float>(frame.player_root_masks)
-            .subspan(board * player_width, player_width);
-    std::span<float> opponent_masked =
-        std::span<float>(frame.opponent_root_masks)
-            .subspan(board * compiled.padded_hand_counts[opponent_index],
-                     compiled.padded_hand_counts[opponent_index]);
-    terminals.mask_board_reaches(masked_job.board, player,
-                                 jobs[board].root_reaches[player_index],
-                                 player_masked);
-    terminals.mask_board_reaches(masked_job.board, opponent(player),
-                                 jobs[board].root_reaches[opponent_index],
-                                 opponent_masked);
-    masked_job.root_reaches[player_index] = player_masked;
-    masked_job.root_reaches[opponent_index] = opponent_masked;
-  }
-
-  update_batch(river, frame.child_jobs, player, terminals, context,
-               iteration_weight);
-  std::ranges::fill(root_values, 0.0F);
-  for (const BatchJob &job : frame.child_jobs) {
-    assert(job.root_values.size() == player_width);
-    for (size_t hand = 0; hand < player_width; ++hand) {
-      root_values[hand] += job.chance_reach * job.root_values[hand];
-    }
-  }
-}
-
 StreetTree make_tree_from_state(const CompiledStreet &compiled,
                                 const RunoutIndex &board_index,
                                 std::optional<StreetState> &state_slot) {
@@ -810,9 +696,9 @@ void CpuSolveExecutor::update_player(const SolveProgram &program,
         boundary_reaches(flop_tree, flop_reaches, opponent(player));
 
     for (const TurnGroup &turn_group : schedule_turn_groups) {
-      for (uint32_t turn_offset = 0; turn_offset < turn_group.parent_row_count;
-           ++turn_offset) {
-        BoardIndex turn_board = turn_group.parent_row_begin + turn_offset;
+      for (uint32_t turn_offset = 0;
+           turn_offset < turn_group.parent_board_count; ++turn_offset) {
+        BoardIndex turn_board = turn_group.parent_board_begin + turn_offset;
         size_t turn_child_begin = flop_to_turn.child_offsets[turn_board];
         size_t turn_child_end = flop_to_turn.child_offsets[turn_board + 1];
         float turn_local_chance =
@@ -930,8 +816,10 @@ void CpuSolveExecutor::update_player(const SolveProgram &program,
     return;
   }
 
-    std::copy(root_ranges[player_index].begin(), root_ranges[player_index].end(),
-            root_values.begin());
+  std::array<std::span<const float>, 2> river_roots = root_ranges;
+  RiverUpdateBuffers buffers;
+  update_river(river_tree, 0, river_roots, player, terminals, buffers,
+               root_values, 1.0F, iteration_weight);
   store_tree_state(state.river, river_tree);
 }
 

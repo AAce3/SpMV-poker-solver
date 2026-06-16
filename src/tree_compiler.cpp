@@ -186,55 +186,54 @@ compile_transition_graph(const RunoutIndex &board_index, Street parent_street) {
 
 ExecutionSchedule build_execution_schedule(const RunoutIndex &board_index,
                                            Street starting_street,
-                                           size_t turn_row_capacity,
-                                           size_t river_row_capacity) {
+                                           size_t turn_board_capacity,
+                                           size_t river_board_capacity) {
   ExecutionSchedule schedule;
-  schedule.turn_row_capacity = turn_row_capacity;
-  schedule.river_row_capacity = river_row_capacity;
+  schedule.turn_board_capacity = turn_board_capacity;
+  schedule.river_board_capacity = river_board_capacity;
 
   if (starting_street == Street::River) {
     return schedule;
   }
-  assert(turn_row_capacity > 0);
+  assert(turn_board_capacity > 0);
 
   size_t turn_parent_count = board_index.board_count(Street::Turn);
   size_t child_per_turn = board_index.child_count(Street::Turn);
-  assert(river_row_capacity >= child_per_turn);
+  assert(river_board_capacity >= child_per_turn);
 
   for (size_t turn_begin = 0; turn_begin < turn_parent_count;) {
     size_t turn_count = 0;
     while (turn_begin + turn_count < turn_parent_count &&
-           turn_count < turn_row_capacity) {
+           turn_count < turn_board_capacity) {
       ++turn_count;
     }
 
     TurnGroup turn_group{
-        .parent_row_begin = checked_index(turn_begin),
-        .parent_row_count = checked_index(turn_count),
-        .child_row_count = checked_index(turn_count * child_per_turn),
+        .parent_board_begin = checked_index(turn_begin),
+        .parent_board_count = checked_index(turn_count),
+        .child_board_count = checked_index(turn_count * child_per_turn),
     };
     schedule.turn_groups.push_back(turn_group);
 
     std::vector<RiverGroup> river_groups;
-    size_t turn_group_end = turn_begin + turn_count;
-    for (size_t river_begin = turn_begin; river_begin < turn_group_end;) {
+    for (size_t local_river_begin = 0; local_river_begin < turn_count;) {
       size_t river_count = 0;
-      while (river_begin + river_count < turn_group_end &&
-             (river_count + 1) * child_per_turn <= river_row_capacity) {
+      while (local_river_begin + river_count < turn_count &&
+             (river_count + 1) * child_per_turn <= river_board_capacity) {
         ++river_count;
       }
       if (river_count == 0) {
         river_count = 1;
       }
       river_groups.push_back(RiverGroup{
-          .parent_row_begin = checked_index(river_begin),
-          .parent_row_count = checked_index(river_count),
-          .child_row_count = checked_index(river_count * child_per_turn),
+          .local_parent_board_begin = checked_index(local_river_begin),
+          .parent_board_count = checked_index(river_count),
+          .child_board_count = checked_index(river_count * child_per_turn),
       });
-      river_begin += river_count;
+      local_river_begin += river_count;
     }
     schedule.river_groups_by_turn_group.push_back(std::move(river_groups));
-    turn_begin = turn_group_end;
+    turn_begin += turn_count;
   }
 
   return schedule;

@@ -124,25 +124,35 @@ int main() {
   std::copy(hero.weights.begin(), hero.weights.end(), roots[0].begin());
   std::copy(villain.weights.begin(), villain.weights.end(), roots[1].begin());
 
-  std::vector<float> root_values(tree.compiled.padded_hand_counts[0], 0.0F);
-  std::vector<BatchJob> jobs{
-      {.board = 0,
-       .root_reaches = {roots[0], roots[1]},
-       .root_values = root_values,
-       .chance_reach = 1.0F},
+  SolveProgram program{
+      .board_index = tree.board_index,
+      .river = tree.compiled,
+      .schedule = ExecutionSchedule{},
+      .terminals = &terminals_op,
   };
-  BatchContext context;
+  SolveState state{
+      .river = {.regrets = tree.regrets, .cumulative_strategy =
+                                        tree.cumulative_strategy},
+  };
+  CpuSolveWorkspace workspace;
+  workspace.river.prepare(tree.compiled, 1);
+  CpuSolveExecutor executor;
+  std::vector<float> root_values(tree.compiled.padded_hand_counts[0], 0.0F);
+  std::array<std::span<const float>, 2> root_ranges{roots[0], roots[1]};
 
   for (size_t iteration = 1; iteration <= 100000; ++iteration) {
-    update_batch(tree, jobs, Player::Hero, terminals_op, context,
-                 static_cast<float>(iteration));
+    executor.update_player(program, state, workspace, Player::Hero, root_ranges,
+                           root_values, static_cast<float>(iteration));
   }
+
+  StreetTree solved_tree(program.river, *program.board_index, std::move(state.river.regrets),
+                        std::move(state.river.cumulative_strategy));
 
   std::array<std::string_view, 2> root_actions{"Check", "Bet"};
   std::cout << "River: 2c 7d 9h Js Kc\n";
   std::cout << "Sample range: 4 hands per player\n";
   std::cout << "Average strategy at the root after 100000 iterations\n";
-  print_average_strategy(tree, 0, tree.compiled.root_value_slot, "Hero root",
+  print_average_strategy(solved_tree, 0, solved_tree.compiled.root_value_slot, "Hero root",
                          root_actions, hero.hands);
 
   std::cout << "\nRoot values\n";

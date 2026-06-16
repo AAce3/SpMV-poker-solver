@@ -141,31 +141,35 @@ void test_transition_graph_and_schedule() {
 
   ExecutionSchedule schedule =
       build_execution_schedule(boards, Street::Turn, 11, 96);
-  size_t total_turn_rows = 0;
+  size_t total_turn_boards = 0;
   for (size_t group = 0; group < schedule.turn_groups.size(); ++group) {
     const TurnGroup &turn_group = schedule.turn_groups[group];
-    check(turn_group.parent_row_count <= schedule.turn_row_capacity,
+    check(turn_group.parent_board_count <= schedule.turn_board_capacity,
           "turn groups fit their capacity");
-    check(turn_group.child_row_count ==
-              turn_group.parent_row_count * child_per_parent,
+    check(turn_group.child_board_count ==
+              turn_group.parent_board_count * child_per_parent,
           "turn group child count is derived from the parent count");
-    total_turn_rows += turn_group.parent_row_count;
+    total_turn_boards += turn_group.parent_board_count;
 
     const std::span<const RiverGroup> river_groups =
         schedule.river_groups_for(group);
-    size_t total_river_rows = 0;
+    size_t total_river_boards = 0;
+    size_t expected_local_begin = 0;
     for (const RiverGroup &river_group : river_groups) {
-      check(river_group.child_row_count <= schedule.river_row_capacity,
+      check(river_group.local_parent_board_begin == expected_local_begin,
+            "river groups use local parent board indexing");
+      check(river_group.child_board_count <= schedule.river_board_capacity,
             "river groups fit their capacity");
-      check(river_group.child_row_count ==
-                river_group.parent_row_count * child_per_parent,
+      check(river_group.child_board_count ==
+                river_group.parent_board_count * child_per_parent,
             "river group child count is derived from the parent count");
-      total_river_rows += river_group.parent_row_count;
+      total_river_boards += river_group.parent_board_count;
+      expected_local_begin += river_group.parent_board_count;
     }
-    check(total_river_rows == turn_group.parent_row_count,
+    check(total_river_boards == turn_group.parent_board_count,
           "river groups cover the full turn group");
   }
-  check(total_turn_rows == parent_count, "turn groups cover all parents");
+  check(total_turn_boards == parent_count, "turn groups cover all parents");
 }
 
 void test_bounded_workspace_sizes() {
@@ -174,8 +178,8 @@ void test_bounded_workspace_sizes() {
 
   CpuStreetWorkspace street_workspace;
   street_workspace.prepare(compiled, 7);
-  check(street_workspace.row_capacity == 7,
-        "street workspace records its row capacity");
+  check(street_workspace.board_capacity == 7,
+        "street workspace records its board capacity");
   check(street_workspace.reaches[0].size() ==
             compiled.forward_plans[0].workspace_slot_count * 7 *
                 compiled.padded_hand_counts[0],
@@ -189,9 +193,9 @@ void test_bounded_workspace_sizes() {
   transition_workspace.prepare(3, 7, 11, compiled);
   check(transition_workspace.endpoint_capacity == 3,
         "transition workspace records endpoint capacity");
-  check(transition_workspace.parent_row_capacity == 7,
+  check(transition_workspace.parent_board_capacity == 7,
         "transition workspace records parent capacity");
-  check(transition_workspace.child_row_capacity == 11,
+  check(transition_workspace.child_board_capacity == 11,
         "transition workspace records child capacity");
   check(transition_workspace.child_boards.size() == 11,
         "transition workspace bounds child boards");
@@ -203,7 +207,7 @@ void test_bounded_workspace_sizes() {
   accumulator.prepare(3, 7, compiled);
   check(accumulator.endpoint_capacity == 3,
         "boundary accumulator records endpoint capacity");
-  check(accumulator.parent_row_capacity == 7,
+  check(accumulator.parent_board_capacity == 7,
         "boundary accumulator records parent capacity");
   check(accumulator.values[1].size() ==
             3 * 7 * compiled.padded_hand_counts[1],
