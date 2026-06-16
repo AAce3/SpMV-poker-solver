@@ -68,16 +68,26 @@ private:
     std::array<IndexRange, 2> player_rank_groups;
   };
 
-  [[nodiscard]] size_t runout_for_board(BoardIndex board) const;
+  struct CompiledTerminalPlan {
+    uint32_t runout_index = 0;
+    BoardMetadata metadata;
+  };
+
+  [[nodiscard]] const CompiledTerminalPlan &terminal_plan(BoardIndex board) const;
+  void evaluate_showdowns_lane_major(
+      BoardIndex board, Player evaluated_player,
+      std::span<const float> lane_major_opponent_reaches,
+      size_t terminal_count, std::span<const CompiledShowdown> showdowns,
+      std::span<float> lane_major_values) const;
 
   const TerminalTables &tables_;
-  std::vector<uint32_t> runout_by_river_board_;
-  std::vector<BoardMetadata> board_metadata_;
+  std::vector<CompiledTerminalPlan> terminal_plans_;
   std::array<std::vector<uint16_t>, 2> rank_groups_by_board_hand_;
   std::array<std::vector<int32_t>, 2> matching_opponent_hands_;
-  std::array<std::vector<float>, 2> board_reach_masks_;
   size_t max_rank_group_count_ = 0;
   mutable std::vector<float> showdown_summary_scratch_;
+  mutable std::vector<float> showdown_lane_major_reach_scratch_;
+  mutable std::vector<float> showdown_lane_major_value_scratch_;
 };
 
 } // namespace spmv_poker

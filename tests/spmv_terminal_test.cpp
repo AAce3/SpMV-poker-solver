@@ -208,6 +208,55 @@ void test_board_batch_layout_matches_individual_evaluation() {
   }
 }
 
+void test_single_board_batch_matches_individual_evaluation() {
+  std::array<uint8_t, 3> flop{0, 5, 10};
+  TerminalTables full(flop);
+  Range hero = selected_range(full.hands(Player::Hero), 2, 0);
+  Range villain = selected_range(full.hands(Player::Villain), 3, 1);
+  TerminalTables tables(flop, hero, villain);
+  RankSummaryTerminalOperator terminals(tables, make_mask(flop));
+
+  std::array<BoardIndex, 1> boards{317};
+  constexpr size_t terminal_count = TERMINAL_TILE_SIZE + 1;
+  size_t opponent_stride = villain.hands.size() + 5;
+  size_t evaluated_stride = hero.hands.size() + 7;
+  std::vector<float> reaches(terminal_count * opponent_stride);
+  for (size_t terminal = 0; terminal < terminal_count; ++terminal) {
+    for (size_t hand = 0; hand < villain.hands.size(); ++hand) {
+      reaches[terminal * opponent_stride + hand] =
+          static_cast<float>(((terminal + 4) * (hand + 6)) % 23) / 23.0F;
+    }
+  }
+
+  std::array showdowns{
+      CompiledShowdown{.win_payoff = 1.5F, .loss_payoff = -2.0F},
+      CompiledShowdown{.win_payoff = 2.5F, .loss_payoff = -1.0F},
+      CompiledShowdown{.win_payoff = 0.5F, .loss_payoff = -3.0F},
+      CompiledShowdown{.win_payoff = 4.0F, .loss_payoff = -2.5F},
+      CompiledShowdown{.win_payoff = 3.0F, .loss_payoff = -1.5F},
+      CompiledShowdown{.win_payoff = 1.0F, .loss_payoff = -4.0F},
+      CompiledShowdown{.win_payoff = 2.0F, .loss_payoff = -3.5F},
+      CompiledShowdown{.win_payoff = 3.5F, .loss_payoff = -0.5F},
+      CompiledShowdown{.win_payoff = 5.0F, .loss_payoff = -2.0F},
+  };
+  std::vector<float> batch_values(terminal_count * evaluated_stride);
+  std::vector<float> direct_values(terminal_count * evaluated_stride);
+  terminals.evaluate_showdown_board_batch(
+      boards, Player::Hero, reaches, opponent_stride, showdowns, batch_values,
+      evaluated_stride);
+  terminals.evaluate_showdowns(boards[0], Player::Hero, reaches,
+                               opponent_stride, showdowns, direct_values,
+                               evaluated_stride);
+
+  for (size_t terminal = 0; terminal < terminal_count; ++terminal) {
+    for (size_t hand = 0; hand < evaluated_stride; ++hand) {
+      check_close(batch_values[terminal * evaluated_stride + hand],
+                  direct_values[terminal * evaluated_stride + hand],
+                  "single board batch showdown mismatch");
+    }
+  }
+}
+
 void test_native_board_batch_matches_individual_evaluation() {
   std::array<uint8_t, 3> flop{0, 5, 10};
   TerminalTables full(flop);
@@ -306,6 +355,7 @@ int main() {
     test_tiled_rank_scan_matches_terminal_tables();
     test_both_evaluated_players();
     test_board_batch_layout_matches_individual_evaluation();
+    test_single_board_batch_matches_individual_evaluation();
     test_native_board_batch_matches_individual_evaluation();
   } catch (const std::exception &error) {
     std::cerr << "Test failure: " << error.what() << '\n';
